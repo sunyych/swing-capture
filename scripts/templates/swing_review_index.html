@@ -1,0 +1,1262 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Swing 标注台</title>
+    <style>
+      :root {
+        --bg: #f2efe8;
+        --paper: rgba(255, 251, 243, 0.94);
+        --card: #fbf7ee;
+        --line: rgba(45, 35, 18, 0.12);
+        --text: #221a0f;
+        --muted: #6f6252;
+        --accent: #ba4a18;
+        --accent-soft: rgba(186, 74, 24, 0.12);
+        --good: #1b8757;
+        --bad: #bb2e3e;
+        --skip: #8a6a1e;
+        --shadow: 0 18px 40px rgba(62, 39, 15, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--text);
+        font-family: "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(255, 206, 123, 0.34), transparent 28%),
+          radial-gradient(circle at top right, rgba(186, 74, 24, 0.18), transparent 34%),
+          linear-gradient(180deg, #f6f1e7, var(--bg));
+      }
+
+      button,
+      select,
+      textarea,
+      input {
+        font: inherit;
+      }
+
+      .app {
+        min-height: 100vh;
+        padding: 18px 14px calc(132px + env(safe-area-inset-bottom));
+      }
+
+      .shell {
+        max-width: 1340px;
+        margin: 0 auto;
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel {
+        background: var(--paper);
+        backdrop-filter: blur(18px);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        box-shadow: var(--shadow);
+      }
+
+      .hero {
+        padding: 18px;
+      }
+
+      .eyebrow {
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      h1 {
+        margin: 8px 0;
+        font-size: clamp(28px, 5vw, 42px);
+        line-height: 1;
+      }
+
+      .sub {
+        color: var(--muted);
+        margin: 0;
+        line-height: 1.5;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .summary-card,
+      .meta-item,
+      .form-card {
+        background: var(--card);
+        border-radius: 18px;
+        padding: 14px;
+      }
+
+      .summary-card span,
+      .meta-item span,
+      .form-card label,
+      .field-label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .summary-card strong,
+      .meta-item strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 21px;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+        gap: 14px;
+      }
+
+      .review-pane,
+      .sidebar {
+        padding: 16px;
+      }
+
+      .source-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      video {
+        width: 100%;
+        display: block;
+        border-radius: 22px;
+        margin-top: 14px;
+        background: #000;
+        aspect-ratio: 16 / 9;
+      }
+
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .sidebar {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+
+      .toolbar,
+      .toolbar-compact,
+      .stat-line,
+      .toggle-row,
+      .form-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .pill {
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #fff7ea;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .source-strip,
+      .candidate-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .source-strip {
+        max-height: 22vh;
+        overflow: auto;
+      }
+
+      .candidate-list {
+        max-height: 38vh;
+        overflow: auto;
+      }
+
+      .source-row,
+      .candidate-row {
+        width: 100%;
+        text-align: left;
+        border: 1px solid var(--line);
+        background: var(--card);
+        border-radius: 18px;
+        padding: 12px 14px;
+        color: var(--text);
+      }
+
+      .source-row.active,
+      .candidate-row.active {
+        border-color: rgba(186, 74, 24, 0.6);
+        box-shadow: inset 0 0 0 1px rgba(186, 74, 24, 0.2);
+      }
+
+      .source-row small,
+      .candidate-row small,
+      .helper-text {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+
+      .toggle-row button,
+      .toolbar button,
+      .toolbar-compact button,
+      .form-actions button {
+        padding: 10px 14px;
+      }
+
+      .toggle-active {
+        background: var(--accent);
+        color: white;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .form-card select,
+      .form-card textarea,
+      .form-card input {
+        width: 100%;
+        margin-top: 8px;
+        border: 1px solid rgba(45, 35, 18, 0.14);
+        border-radius: 14px;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, 0.92);
+      }
+
+      .form-card textarea {
+        min-height: 96px;
+        resize: vertical;
+      }
+
+      .quality-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .quality-card {
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid rgba(45, 35, 18, 0.08);
+        border-radius: 16px;
+        padding: 10px;
+      }
+
+      .quality-card strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .issue-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 10px;
+        margin-top: 10px;
+      }
+
+      .issue-item {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 10px 12px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid rgba(45, 35, 18, 0.08);
+      }
+
+      .issue-item input {
+        width: auto;
+        margin: 0;
+      }
+
+      .footer-bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 30;
+        padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+        background: linear-gradient(180deg, rgba(242, 239, 232, 0), rgba(242, 239, 232, 0.92) 32%, rgba(242, 239, 232, 0.98));
+      }
+
+      .footer-inner {
+        max-width: 1340px;
+        margin: 0 auto;
+        background: rgba(255, 249, 239, 0.94);
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        box-shadow: var(--shadow);
+        padding: 10px;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 18px;
+        padding: 14px 16px;
+        font-size: 15px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      .btn-negative {
+        background: var(--bad);
+        color: white;
+      }
+
+      .btn-skip {
+        background: var(--skip);
+        color: white;
+      }
+
+      .btn-positive {
+        background: var(--good);
+        color: white;
+      }
+
+      .btn-secondary {
+        background: white;
+        color: var(--text);
+        border: 1px solid var(--line);
+      }
+
+      .empty {
+        padding: 32px 18px;
+        color: var(--muted);
+        text-align: center;
+        background: rgba(255, 255, 255, 0.4);
+        border-radius: 18px;
+      }
+
+      @media (max-width: 1120px) {
+        .workspace,
+        .summary-grid,
+        .footer-inner,
+        .meta-grid,
+        .quality-grid,
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .source-strip,
+        .candidate-list {
+          max-height: none;
+        }
+
+        .app {
+          padding-bottom: calc(286px + env(safe-area-inset-bottom));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="shell">
+        <section class="panel hero">
+          <div class="eyebrow">Swing Review Workspace</div>
+          <h1 id="taskTitle">Swing 标注台</h1>
+          <p class="sub" id="summaryText">正在加载候选片段…</p>
+          <div class="summary-grid">
+            <div class="summary-card">
+              <span>候选总数</span>
+              <strong id="candidateCount">0</strong>
+            </div>
+            <div class="summary-card">
+              <span>来源视频</span>
+              <strong id="sourceCount">0</strong>
+            </div>
+            <div class="summary-card">
+              <span>已标正样本</span>
+              <strong id="positiveCount">0</strong>
+            </div>
+            <div class="summary-card">
+              <span>已标负样本</span>
+              <strong id="negativeCount">0</strong>
+            </div>
+            <div class="summary-card">
+              <span>已标跳过</span>
+              <strong id="skipCount">0</strong>
+            </div>
+            <div class="summary-card">
+              <span>当前组</span>
+              <strong id="groupProgress">0 / 0</strong>
+            </div>
+          </div>
+        </section>
+
+        <div class="workspace">
+          <section class="panel review-pane">
+            <div class="toolbar">
+              <div class="source-chip" id="sourceChip">等待载入</div>
+              <div class="pill" id="labelHint">键盘：A / S / D / ← / → / [ / ]</div>
+            </div>
+            <video id="candidateVideo" controls preload="metadata" playsinline autoplay muted></video>
+            <div class="meta-grid">
+              <div class="meta-item">
+                <span>候选编号</span>
+                <strong id="candidateId">-</strong>
+              </div>
+              <div class="meta-item">
+                <span>当前进度</span>
+                <strong id="progressText">0 / 0</strong>
+              </div>
+              <div class="meta-item">
+                <span>峰值分数</span>
+                <strong id="peakScore">-</strong>
+              </div>
+              <div class="meta-item">
+                <span>动作窗口</span>
+                <strong id="windowRange">-</strong>
+              </div>
+              <div class="meta-item">
+                <span>峰值时间</span>
+                <strong id="peakTime">-</strong>
+              </div>
+              <div class="meta-item">
+                <span>当前标签</span>
+                <strong id="currentLabel">未标注</strong>
+              </div>
+            </div>
+
+            <div class="form-card" style="margin-top: 14px">
+              <div class="toolbar">
+                <div>
+                  <span class="field-label">Swing 标注细节</span>
+                  <small class="helper-text">
+                    快速标签用底部按钮，细节字段会自动保存，给后面的 swing 质量模型和小型教练模型用。
+                  </small>
+                </div>
+                <div class="pill" id="draftStatus">草稿：未修改</div>
+              </div>
+
+              <div class="form-grid" style="margin-top: 12px">
+                <div>
+                  <label for="viewSelect">视角</label>
+                  <select id="viewSelect">
+                    <option value="unknown">unknown</option>
+                    <option value="front">front</option>
+                    <option value="back">back</option>
+                    <option value="side">side</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="customIssues">补充问题标签</label>
+                  <input
+                    id="customIssues"
+                    type="text"
+                    placeholder="例如: head_drift, early_hip_open"
+                  />
+                </div>
+              </div>
+
+              <div style="margin-top: 12px">
+                <span class="field-label">质量分（1-5）</span>
+                <div class="quality-grid" style="margin-top: 8px">
+                  <div class="quality-card">
+                    <strong>setup</strong>
+                    <select id="scoreSetup">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </div>
+                  <div class="quality-card">
+                    <strong>load</strong>
+                    <select id="scoreLoad">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </div>
+                  <div class="quality-card">
+                    <strong>rotation</strong>
+                    <select id="scoreRotation">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </div>
+                  <div class="quality-card">
+                    <strong>contact</strong>
+                    <select id="scoreContact">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </div>
+                  <div class="quality-card">
+                    <strong>finish</strong>
+                    <select id="scoreFinish">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div style="margin-top: 12px">
+                <span class="field-label">常见问题标签</span>
+                <div class="issue-grid" id="issueGrid"></div>
+              </div>
+
+              <div style="margin-top: 12px">
+                <label for="coachSummary">教练总结</label>
+                <textarea
+                  id="coachSummary"
+                  placeholder="例如：重心提早往前跑，击球后收杆不稳。先练后髋先转，再把收杆停住 1 秒。"
+                ></textarea>
+              </div>
+
+              <div class="form-actions" style="margin-top: 12px">
+                <button class="btn-secondary" id="saveDraft">保存当前细节</button>
+                <button class="btn-secondary" id="clearCurrent">清空当前</button>
+              </div>
+            </div>
+          </section>
+
+          <aside class="panel sidebar">
+            <div class="toolbar">
+              <button class="btn-secondary" id="gotoPrev">上一条</button>
+              <button class="btn-secondary" id="gotoNext">下一条</button>
+              <button class="btn-secondary" id="gotoPrevGroup">上一组视频</button>
+              <button class="btn-secondary" id="gotoNextGroup">下一组视频</button>
+              <button class="btn-secondary" id="gotoNextUnlabeled">下一个未标注</button>
+            </div>
+
+            <div class="stat-line">
+              <div class="pill" id="serverStatus">Server: local cache</div>
+              <div class="pill" id="groupStatus">当前仅看本组</div>
+            </div>
+
+            <div class="toggle-row">
+              <button class="btn-secondary toggle-active" id="toggleGroupOnly">只看当前视频</button>
+              <button class="btn-secondary" id="toggleAllCandidates">看全部候选</button>
+            </div>
+
+            <div class="toggle-row">
+              <button class="btn-secondary toggle-active" id="filterAllKinds">全部候选</button>
+              <button class="btn-secondary" id="filterRawOnly">只看 raw review</button>
+              <button class="btn-secondary" id="filterPoseOnly">只看 pose clips</button>
+            </div>
+
+            <div>
+              <span class="field-label">视频分组</span>
+              <div class="source-strip" id="sourceStrip"></div>
+            </div>
+
+            <div>
+              <span class="field-label">候选片段</span>
+              <div class="candidate-list" id="candidateList"></div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer-bar">
+      <div class="footer-inner">
+        <button class="btn-negative" id="markNo">其他动作 (A)</button>
+        <button class="btn-skip" id="markSkip">跳过 (S)</button>
+        <button class="btn-positive" id="markYes">目标动作 (D)</button>
+        <button class="btn-secondary" id="exportLabels">导出</button>
+        <button class="btn-secondary" id="saveAndNext">保存细节并下一条</button>
+      </div>
+    </div>
+
+    <script src="./review_data.js"></script>
+    <script>
+      const reviewData = window.REVIEW_DATA || { candidates: [], sources: [] };
+      const storageKey = `action-review-labels:${reviewData.task_name || "default"}`;
+      const issueCatalog = [
+        "early_hip_open",
+        "hands_cast",
+        "head_drift",
+        "finish_off_balance",
+        "late_rotation",
+        "front_side_pull",
+        "barrel_drop_early",
+        "poor_weight_transfer",
+      ];
+
+      let labels = {};
+      let currentIndex = 0;
+      let currentSourceIndex = 0;
+      let saveMode = "local";
+      let showSourceOnly = true;
+      let candidateKindFilter = "all";
+      let persistTimer = null;
+
+      const candidates = Array.isArray(reviewData.candidates) ? reviewData.candidates : [];
+      const positiveLabel = reviewData.positive_label || "action";
+      const negativeLabel = reviewData.negative_label || "other";
+
+      const candidateVideo = document.getElementById("candidateVideo");
+      const candidateId = document.getElementById("candidateId");
+      const peakScore = document.getElementById("peakScore");
+      const peakTime = document.getElementById("peakTime");
+      const windowRange = document.getElementById("windowRange");
+      const currentLabel = document.getElementById("currentLabel");
+      const candidateList = document.getElementById("candidateList");
+      const sourceStrip = document.getElementById("sourceStrip");
+      const taskTitle = document.getElementById("taskTitle");
+      const candidateCount = document.getElementById("candidateCount");
+      const sourceCount = document.getElementById("sourceCount");
+      const positiveCount = document.getElementById("positiveCount");
+      const negativeCount = document.getElementById("negativeCount");
+      const skipCount = document.getElementById("skipCount");
+      const summaryText = document.getElementById("summaryText");
+      const progressText = document.getElementById("progressText");
+      const sourceChip = document.getElementById("sourceChip");
+      const serverStatus = document.getElementById("serverStatus");
+      const groupStatus = document.getElementById("groupStatus");
+      const groupProgress = document.getElementById("groupProgress");
+      const draftStatus = document.getElementById("draftStatus");
+      const toggleGroupOnly = document.getElementById("toggleGroupOnly");
+      const toggleAllCandidates = document.getElementById("toggleAllCandidates");
+      const filterAllKinds = document.getElementById("filterAllKinds");
+      const filterRawOnly = document.getElementById("filterRawOnly");
+      const filterPoseOnly = document.getElementById("filterPoseOnly");
+
+      const viewSelect = document.getElementById("viewSelect");
+      const customIssuesInput = document.getElementById("customIssues");
+      const coachSummaryInput = document.getElementById("coachSummary");
+      const scoreInputs = {
+        setup: document.getElementById("scoreSetup"),
+        load: document.getElementById("scoreLoad"),
+        rotation: document.getElementById("scoreRotation"),
+        contact: document.getElementById("scoreContact"),
+        finish: document.getElementById("scoreFinish"),
+      };
+
+      taskTitle.textContent = reviewData.task_name || "Swing 标注台";
+      document.getElementById("markYes").textContent = `${positiveLabel} (D)`;
+      document.getElementById("markNo").textContent = `${negativeLabel} (A)`;
+
+      buildIssueGrid();
+      const sourceGroups = buildSourceGroups();
+
+      async function loadLabels() {
+        try {
+          const response = await fetch("/api/labels");
+          if (!response.ok) throw new Error("server labels unavailable");
+          labels = await response.json();
+          saveMode = "server";
+          serverStatus.textContent = "Server: auto save";
+          return;
+        } catch (_) {
+          labels = JSON.parse(localStorage.getItem(storageKey) || "{}");
+          saveMode = "local";
+          serverStatus.textContent = "Server: local cache";
+        }
+      }
+
+      async function persistLabels() {
+        if (saveMode === "server") {
+          await fetch("/api/labels", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(labels),
+          });
+        } else {
+          localStorage.setItem(storageKey, JSON.stringify(labels));
+        }
+      }
+
+      function schedulePersist() {
+        draftStatus.textContent = "草稿：待保存";
+        if (persistTimer) {
+          clearTimeout(persistTimer);
+        }
+        persistTimer = setTimeout(async () => {
+          try {
+            await persistLabels();
+            draftStatus.textContent = "草稿：已保存";
+          } catch (_) {
+            draftStatus.textContent = "草稿：保存失败";
+          }
+        }, 250);
+      }
+
+      function buildIssueGrid() {
+        const issueGrid = document.getElementById("issueGrid");
+        issueGrid.innerHTML = "";
+        issueCatalog.forEach((issue) => {
+          const label = document.createElement("label");
+          label.className = "issue-item";
+          label.innerHTML = `
+            <input type="checkbox" value="${issue}" />
+            <span>${issue}</span>
+          `;
+          const input = label.querySelector("input");
+          input.addEventListener("change", saveDraftOnly);
+          issueGrid.appendChild(label);
+        });
+      }
+
+      function buildSourceGroups() {
+        const map = new Map();
+        const orderedSources = Array.isArray(reviewData.sources) && reviewData.sources.length
+          ? [...reviewData.sources].sort((a, b) => (a.source_order || 0) - (b.source_order || 0))
+          : [];
+
+        candidates.forEach((candidate, index) => {
+          if (!map.has(candidate.source_id)) {
+            const fromManifest = orderedSources.find((item) => item.source_id === candidate.source_id);
+            map.set(candidate.source_id, {
+              source_id: candidate.source_id,
+              source_name: candidate.source_name,
+              source_order: candidate.source_order || fromManifest?.source_order || map.size + 1,
+              indices: [],
+            });
+          }
+          map.get(candidate.source_id).indices.push(index);
+        });
+
+        return [...map.values()].sort((a, b) => a.source_order - b.source_order);
+      }
+
+      function currentSourceGroup() {
+        return activeSourceGroups()[currentSourceIndex] || null;
+      }
+
+      function visibleIndices() {
+        const filteredIndices = filteredCandidateIndices();
+        if (!showSourceOnly) {
+          return filteredIndices;
+        }
+        return currentSourceGroup()?.indices || [];
+      }
+
+      function filteredCandidateIndices() {
+        return candidates
+          .map((candidate, index) => ({ candidate, index }))
+          .filter(({ candidate }) => matchesCandidateKindFilter(candidate))
+          .map(({ index }) => index);
+      }
+
+      function matchesCandidateKindFilter(candidate) {
+        if (candidateKindFilter === "raw") return candidate.has_pose_features === false;
+        if (candidateKindFilter === "pose") return candidate.has_pose_features !== false;
+        return true;
+      }
+
+      function activeSourceGroups() {
+        return sourceGroups
+          .map((group) => ({
+            ...group,
+            indices: group.indices.filter((index) => matchesCandidateKindFilter(candidates[index])),
+          }))
+          .filter((group) => group.indices.length > 0);
+      }
+
+      function renderSummary() {
+        const values = Object.values(labels);
+        const positives = values.filter((value) => value.label === positiveLabel).length;
+        const negatives = values.filter((value) => value.label === negativeLabel).length;
+        const skipped = values.filter((value) => value.label === "skip").length;
+        const labeled = values.filter((value) => !!value.label).length;
+        const rawCount = candidates.filter((candidate) => candidate.has_pose_features === false).length;
+        candidateCount.textContent = String(candidates.length || 0);
+        sourceCount.textContent = String(sourceGroups.length || 0);
+        positiveCount.textContent = String(positives);
+        negativeCount.textContent = String(negatives);
+        skipCount.textContent = String(skipped);
+
+        const group = currentSourceGroup();
+        if (group) {
+          const labeledInGroup = group.indices.filter((index) => labels[candidates[index].candidate_id]?.label).length;
+          groupProgress.textContent = `${labeledInGroup} / ${group.indices.length}`;
+        } else {
+          groupProgress.textContent = "0 / 0";
+        }
+
+        summaryText.textContent =
+          `已完成 ${labeled} / ${candidates.length} 条，其中 raw review ${rawCount} 条。左右切换同组 swing，方括号切换上一组 / 下一组视频。`;
+      }
+
+      function labelFor(candidate) {
+        return labels[candidate.candidate_id]?.label || "未标注";
+      }
+
+      function renderSourceStrip() {
+        sourceStrip.innerHTML = "";
+        const groups = activeSourceGroups();
+        if (!groups.length) {
+          sourceStrip.innerHTML = '<div class="empty">没有来源视频</div>';
+          return;
+        }
+        groups.forEach((group, index) => {
+          const labeledCount = group.indices.filter((candidateIndex) => labels[candidates[candidateIndex].candidate_id]?.label).length;
+          const row = document.createElement("button");
+          row.className = `source-row${index === currentSourceIndex ? " active" : ""}`;
+          row.innerHTML = `
+            <strong>${group.source_name}</strong>
+            <small>${labeledCount} / ${group.indices.length} 已标注</small>
+          `;
+          row.addEventListener("click", () => {
+            currentSourceIndex = index;
+            if (group.indices.length) {
+              currentIndex = group.indices.includes(currentIndex) ? currentIndex : group.indices[0];
+            }
+            renderCurrent();
+          });
+          sourceStrip.appendChild(row);
+        });
+      }
+
+      function renderCandidateList() {
+        candidateList.innerHTML = "";
+        const indices = visibleIndices();
+        if (!indices.length) {
+          candidateList.innerHTML = '<div class="empty">当前分组没有候选片段</div>';
+          return;
+        }
+        indices.forEach((index) => {
+          const candidate = candidates[index];
+          const row = document.createElement("button");
+          const view = labels[candidate.candidate_id]?.view || "unknown";
+          const scoreText = candidate.has_pose_features === false
+            ? "raw review"
+            : `score ${formatNumber(candidate.peak_score, 2, "-")}`;
+          row.className = `candidate-row${index === currentIndex ? " active" : ""}`;
+          row.innerHTML = `
+            <strong>${candidate.candidate_id}</strong>
+            <small>${candidate.source_name} · ${scoreText} · ${labelFor(candidate)} · ${view}</small>
+          `;
+          row.addEventListener("click", () => {
+            currentIndex = index;
+            syncCurrentSourceFromIndex();
+            renderCurrent();
+          });
+          candidateList.appendChild(row);
+        });
+      }
+
+      function syncCurrentSourceFromIndex() {
+        const candidate = candidates[currentIndex];
+        if (!candidate) return;
+        const nextGroupIndex = activeSourceGroups().findIndex((group) => group.source_id === candidate.source_id);
+        if (nextGroupIndex >= 0) {
+          currentSourceIndex = nextGroupIndex;
+        }
+      }
+
+      function applyDefaultFormState() {
+        viewSelect.value = "unknown";
+        Object.values(scoreInputs).forEach((input) => {
+          input.value = "3";
+        });
+        customIssuesInput.value = "";
+        coachSummaryInput.value = "";
+        document.querySelectorAll("#issueGrid input[type='checkbox']").forEach((input) => {
+          input.checked = false;
+        });
+      }
+
+      function loadDraftIntoForm(candidate) {
+        applyDefaultFormState();
+        const record = labels[candidate.candidate_id];
+        if (!record) return;
+        viewSelect.value = record.view || "unknown";
+        const qualityScores = record.qualityScores || {};
+        Object.entries(scoreInputs).forEach(([key, input]) => {
+          input.value = String(qualityScores[key] || 3);
+        });
+        const selectedIssues = new Set(Array.isArray(record.issues) ? record.issues : []);
+        const customIssues = [];
+        document.querySelectorAll("#issueGrid input[type='checkbox']").forEach((input) => {
+          input.checked = selectedIssues.has(input.value);
+          if (input.checked) {
+            selectedIssues.delete(input.value);
+          }
+        });
+        selectedIssues.forEach((value) => customIssues.push(value));
+        customIssuesInput.value = customIssues.join(", ");
+        coachSummaryInput.value = record.coachSummary || "";
+      }
+
+      function selectedIssues() {
+        const issues = new Set();
+        document.querySelectorAll("#issueGrid input[type='checkbox']").forEach((input) => {
+          if (input.checked) {
+            issues.add(input.value);
+          }
+        });
+        customIssuesInput.value
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .forEach((value) => issues.add(value));
+        return [...issues];
+      }
+
+      function currentQualityScores() {
+        return {
+          setup: Number(scoreInputs.setup.value),
+          load: Number(scoreInputs.load.value),
+          rotation: Number(scoreInputs.rotation.value),
+          contact: Number(scoreInputs.contact.value),
+          finish: Number(scoreInputs.finish.value),
+        };
+      }
+
+      function hasOnlyDefaultDetail(record) {
+        const view = record.view || "unknown";
+        const coachSummary = (record.coachSummary || "").trim();
+        const issues = Array.isArray(record.issues) ? record.issues : [];
+        const qualityScores = record.qualityScores || {};
+        const qualitiesDefault = ["setup", "load", "rotation", "contact", "finish"].every(
+          (key) => Number(qualityScores[key] || 3) === 3,
+        );
+        return !record.label && view === "unknown" && !coachSummary && issues.length === 0 && qualitiesDefault;
+      }
+
+      function makeRecord(candidate, overrideLabel) {
+        const existing = labels[candidate.candidate_id] || {};
+        const record = {
+          ...existing,
+          label: overrideLabel !== undefined ? overrideLabel : existing.label,
+          source_id: candidate.source_id,
+          source_name: candidate.source_name,
+          source_order: candidate.source_order,
+          source_candidate_index: candidate.source_candidate_index,
+          peak_score: candidate.peak_score,
+          peak_timestamp_ms: candidate.peak_timestamp_ms,
+          has_pose_features: candidate.has_pose_features,
+          candidate_kind: candidate.candidate_kind,
+          csv_rel_path: candidate.csv_rel_path,
+          json_rel_path: candidate.json_rel_path,
+          video_rel_path: candidate.video_rel_path,
+          window_start_ms: candidate.window_start_ms,
+          window_end_ms: candidate.window_end_ms,
+          view: viewSelect.value,
+          qualityScores: currentQualityScores(),
+          issues: selectedIssues(),
+          coachSummary: coachSummaryInput.value.trim(),
+          updatedAt: new Date().toISOString(),
+        };
+        if (hasOnlyDefaultDetail(record)) {
+          return null;
+        }
+        return record;
+      }
+
+      async function saveDraftOnly() {
+        const candidate = candidates[currentIndex];
+        if (!candidate) return;
+        const record = makeRecord(candidate);
+        if (record) {
+          labels[candidate.candidate_id] = record;
+        } else {
+          delete labels[candidate.candidate_id];
+        }
+        schedulePersist();
+        renderCurrentLabel(candidate);
+        renderSummary();
+        renderCandidateList();
+        renderSourceStrip();
+      }
+
+      function renderCurrentLabel(candidate) {
+        const record = labels[candidate.candidate_id];
+        if (!record) {
+          currentLabel.textContent = "未标注";
+          return;
+        }
+        const issuesCount = Array.isArray(record.issues) ? record.issues.length : 0;
+        const label = record.label || "草稿";
+        const mode = candidate.has_pose_features === false ? "raw review" : "pose clip";
+        currentLabel.textContent = `${label} · ${record.view || "unknown"} · issues ${issuesCount} · ${mode}`;
+      }
+
+      function renderCurrent() {
+        ensureSelectionMatchesFilters();
+        const candidate = candidates[currentIndex];
+        syncCurrentSourceFromIndex();
+        renderSourceStrip();
+        renderCandidateList();
+        renderSummary();
+
+        if (!candidate) {
+          candidateVideo.removeAttribute("src");
+          candidateId.textContent = "没有候选片段";
+          peakScore.textContent = "-";
+          peakTime.textContent = "-";
+          windowRange.textContent = "-";
+          currentLabel.textContent = "-";
+          sourceChip.textContent = "没有来源视频";
+          progressText.textContent = "0 / 0";
+          groupStatus.textContent = showSourceOnly ? "当前仅看本组" : "当前查看全部";
+          return;
+        }
+
+        const indices = visibleIndices();
+        const visiblePosition = indices.indexOf(currentIndex);
+
+        candidateVideo.src = candidate.video_rel_path;
+        candidateVideo.load();
+        requestAutoPlay();
+        candidateId.textContent = candidate.candidate_id;
+        peakScore.textContent = candidate.has_pose_features === false
+          ? "raw review"
+          : formatNumber(candidate.peak_score, 3, "-");
+        peakTime.textContent = candidate.has_pose_features === false
+          ? "-"
+          : `${formatNumber(candidate.peak_timestamp_ms, 0, "-")} ms`;
+        windowRange.textContent = `${formatNumber(candidate.window_start_ms, 0, "-")} - ${formatNumber(candidate.window_end_ms, 0, "-")} ms`;
+        sourceChip.textContent = `${candidate.source_name} · 第 ${currentSourceIndex + 1} 组`;
+        progressText.textContent = `${visiblePosition + 1} / ${indices.length}`;
+        const scope = showSourceOnly ? "当前仅看本组" : "当前查看全部";
+        const kindText = candidateKindFilter === "raw" ? " · raw review" : candidateKindFilter === "pose" ? " · pose clips" : "";
+        groupStatus.textContent = `${scope}${kindText}`;
+        renderCurrentLabel(candidate);
+        loadDraftIntoForm(candidate);
+      }
+
+      function formatNumber(value, digits = 0, fallback = "-") {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric.toFixed(digits) : fallback;
+      }
+
+      function moveWithinVisible(delta) {
+        const indices = visibleIndices();
+        if (!indices.length) return;
+        const visiblePosition = Math.max(0, indices.indexOf(currentIndex));
+        const nextPosition = Math.min(indices.length - 1, Math.max(0, visiblePosition + delta));
+        currentIndex = indices[nextPosition];
+        renderCurrent();
+      }
+
+      function moveGroup(delta) {
+        const groups = activeSourceGroups();
+        if (!groups.length) return;
+        currentSourceIndex = Math.min(groups.length - 1, Math.max(0, currentSourceIndex + delta));
+        const group = currentSourceGroup();
+        if (group && group.indices.length) {
+          const nextUnlabeled = group.indices.find((index) => !labels[candidates[index].candidate_id]?.label);
+          currentIndex = nextUnlabeled !== undefined ? nextUnlabeled : group.indices[0];
+        }
+        renderCurrent();
+      }
+
+      function moveToNextUnlabeled() {
+        if (!candidates.length) return;
+        const scopedIndices = visibleIndices();
+        const currentScopedPosition = scopedIndices.indexOf(currentIndex);
+
+        for (let index = currentScopedPosition + 1; index < scopedIndices.length; index += 1) {
+          const candidateIndex = scopedIndices[index];
+          if (!labels[candidates[candidateIndex].candidate_id]?.label) {
+            currentIndex = candidateIndex;
+            renderCurrent();
+            return;
+          }
+        }
+
+        const groups = activeSourceGroups();
+        for (let groupIndex = currentSourceIndex + 1; groupIndex < groups.length; groupIndex += 1) {
+          const nextGroup = groups[groupIndex];
+          const nextUnlabeled = nextGroup.indices.find((candidateIndex) => !labels[candidates[candidateIndex].candidate_id]?.label);
+          if (nextUnlabeled !== undefined) {
+            currentSourceIndex = groupIndex;
+            currentIndex = nextUnlabeled;
+            renderCurrent();
+            return;
+          }
+        }
+
+        const globalNext = candidates.findIndex(
+          (candidate, index) => index > currentIndex && !labels[candidate.candidate_id]?.label,
+        );
+        if (globalNext >= 0) {
+          currentIndex = globalNext;
+        }
+        renderCurrent();
+      }
+
+      async function labelCurrent(label) {
+        const candidate = candidates[currentIndex];
+        if (!candidate) return;
+        const record = makeRecord(candidate, label);
+        if (record) {
+          labels[candidate.candidate_id] = record;
+        }
+        await persistLabels();
+        draftStatus.textContent = "草稿：已保存";
+        moveToNextUnlabeled();
+      }
+
+      async function saveAndNext() {
+        const candidate = candidates[currentIndex];
+        if (!candidate) return;
+        const record = makeRecord(candidate);
+        if (record) {
+          labels[candidate.candidate_id] = record;
+          await persistLabels();
+          draftStatus.textContent = "草稿：已保存";
+        }
+        moveWithinVisible(1);
+      }
+
+      async function clearCurrentLabel() {
+        const candidate = candidates[currentIndex];
+        if (!candidate) return;
+        delete labels[candidate.candidate_id];
+        applyDefaultFormState();
+        await persistLabels();
+        draftStatus.textContent = "草稿：已清空";
+        renderCurrent();
+      }
+
+      async function exportLabels() {
+        if (saveMode === "server") {
+          window.location.href = "/api/labels/export";
+          return;
+        }
+        const blob = new Blob([JSON.stringify(labels, null, 2)], {
+          type: "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "labels.json";
+        link.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function setScope(groupOnly) {
+        showSourceOnly = groupOnly;
+        toggleGroupOnly.classList.toggle("toggle-active", groupOnly);
+        toggleAllCandidates.classList.toggle("toggle-active", !groupOnly);
+        renderCurrent();
+      }
+
+      function setCandidateKindFilter(nextFilter) {
+        candidateKindFilter = nextFilter;
+        filterAllKinds.classList.toggle("toggle-active", nextFilter === "all");
+        filterRawOnly.classList.toggle("toggle-active", nextFilter === "raw");
+        filterPoseOnly.classList.toggle("toggle-active", nextFilter === "pose");
+        currentSourceIndex = 0;
+        ensureSelectionMatchesFilters();
+        renderCurrent();
+      }
+
+      function ensureSelectionMatchesFilters() {
+        const indices = visibleIndices();
+        if (indices.length && !indices.includes(currentIndex)) {
+          currentIndex = indices[0];
+          return;
+        }
+        if (!indices.length) {
+          const filtered = filteredCandidateIndices();
+          currentIndex = filtered.length ? filtered[0] : 0;
+        }
+      }
+
+      document.getElementById("markYes").addEventListener("click", () => labelCurrent(positiveLabel));
+      document.getElementById("markNo").addEventListener("click", () => labelCurrent(negativeLabel));
+      document.getElementById("markSkip").addEventListener("click", () => labelCurrent("skip"));
+      document.getElementById("saveDraft").addEventListener("click", saveDraftOnly);
+      document.getElementById("saveAndNext").addEventListener("click", saveAndNext);
+      document.getElementById("clearCurrent").addEventListener("click", clearCurrentLabel);
+      document.getElementById("exportLabels").addEventListener("click", exportLabels);
+      document.getElementById("gotoPrev").addEventListener("click", () => moveWithinVisible(-1));
+      document.getElementById("gotoNext").addEventListener("click", () => moveWithinVisible(1));
+      document.getElementById("gotoPrevGroup").addEventListener("click", () => moveGroup(-1));
+      document.getElementById("gotoNextGroup").addEventListener("click", () => moveGroup(1));
+      document.getElementById("gotoNextUnlabeled").addEventListener("click", moveToNextUnlabeled);
+      toggleGroupOnly.addEventListener("click", () => setScope(true));
+      toggleAllCandidates.addEventListener("click", () => setScope(false));
+      filterAllKinds.addEventListener("click", () => setCandidateKindFilter("all"));
+      filterRawOnly.addEventListener("click", () => setCandidateKindFilter("raw"));
+      filterPoseOnly.addEventListener("click", () => setCandidateKindFilter("pose"));
+
+      [viewSelect, customIssuesInput, coachSummaryInput, ...Object.values(scoreInputs)].forEach((element) => {
+        element.addEventListener("change", saveDraftOnly);
+        element.addEventListener("input", saveDraftOnly);
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+          return;
+        }
+        if (event.key === "a" || event.key === "A") {
+          labelCurrent(negativeLabel);
+        } else if (event.key === "d" || event.key === "D") {
+          labelCurrent(positiveLabel);
+        } else if (event.key === "s" || event.key === "S") {
+          labelCurrent("skip");
+        } else if (event.key === "ArrowLeft") {
+          moveWithinVisible(-1);
+        } else if (event.key === "ArrowRight") {
+          moveWithinVisible(1);
+        } else if (event.key === "[" || event.key === "{") {
+          moveGroup(-1);
+        } else if (event.key === "]" || event.key === "}") {
+          moveGroup(1);
+        }
+      });
+
+      function requestAutoPlay() {
+        const playPromise = candidateVideo.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => {
+            // Browser autoplay policy can still block in rare cases.
+          });
+        }
+      }
+
+      candidateVideo.addEventListener("loadedmetadata", requestAutoPlay);
+
+      (async () => {
+        await loadLabels();
+        renderSummary();
+        renderCurrent();
+      })();
+    </script>
+  </body>
+</html>

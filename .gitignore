@@ -47,3 +47,5 @@ app.*.map.json
 .venv-*
 .vscode/
 .cursor/
+
+artifacts/

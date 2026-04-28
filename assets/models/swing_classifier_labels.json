@@ -1,0 +1,10 @@
+{
+  "class_names": [
+    "baseball_swing",
+    "other"
+  ],
+  "class_to_index": {
+    "baseball_swing": 0,
+    "other": 1
+  }
+}
