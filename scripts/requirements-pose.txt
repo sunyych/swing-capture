@@ -1,0 +1,5 @@
+# Python 3.9+ required: older wheels import tasks code using list[T] annotations (breaks on 3.8).
+# 0.10.30+ drops mp.solutions; this script uses mp.solutions.pose (pin below that line).
+mediapipe>=0.10.14,<0.10.30
+opencv-python>=4.10.0
+ijson>=3.2.0

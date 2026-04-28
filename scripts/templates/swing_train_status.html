@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Swing 再训练进度</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; margin: 0; background: #f6f7fb; color: #1f2937; }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+      .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .pill { border: 1px solid #d1d5db; border-radius: 999px; padding: 6px 10px; font-size: 12px; background: #fff; }
+      button, a.button { border: 0; border-radius: 10px; padding: 8px 12px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
+      .primary { background: #0f766e; color: #fff; }
+      .secondary { background: #374151; color: #fff; }
+      .danger { background: #b91c1c; color: #fff; }
+      .bar { height: 16px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+      .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #14b8a6, #22c55e); transition: width 200ms ease; }
+      .grid { display: grid; grid-template-columns: 150px 1fr; gap: 8px 12px; margin-top: 12px; }
+      .grid div:nth-child(odd) { color: #6b7280; }
+      pre { background: #111827; color: #d1fae5; border-radius: 12px; padding: 12px; min-height: 420px; max-height: 70vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+      .muted { color: #6b7280; font-size: 13px; }
+      @media (max-width: 800px) {
+        .grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h2 style="margin:0 0 8px 0">Swing 再训练进度</h2>
+        <div class="row">
+          <span class="pill" id="jobId">job: -</span>
+          <span class="pill" id="status">状态：等待中</span>
+          <span class="pill" id="progressText">0%</span>
+          <a class="button secondary" href="/review_recheck.html">返回复核页</a>
+          <button class="primary" id="startBtn">开始新的再训练</button>
+        </div>
+        <p class="muted">这个页面会轮询后端 background task，并显示训练脚本 stdout/stderr。训练默认只使用 review_recheck 中人工确认过的标签。</p>
+      </div>
+
+      <div class="card">
+        <div class="bar"><div class="fill" id="progressFill"></div></div>
+        <div class="grid">
+          <div>当前阶段</div><div id="message">-</div>
+          <div>输出目录</div><div id="outDir">-</div>
+          <div>日志文件</div><div id="logPath">-</div>
+          <div>进程 PID</div><div id="pid">-</div>
+          <div>返回码</div><div id="returnCode">-</div>
+          <div>命令</div><div id="command">-</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 8px 0">后端输出</h3>
+        <pre id="logs">等待训练任务...</pre>
+      </div>
+    </div>
+
+    <script>
+      let jobId = new URLSearchParams(window.location.search).get("job_id");
+      let pollTimer = null;
+
+      const elJobId = document.getElementById("jobId");
+      const elStatus = document.getElementById("status");
+      const elProgressText = document.getElementById("progressText");
+      const elProgressFill = document.getElementById("progressFill");
+      const elMessage = document.getElementById("message");
+      const elOutDir = document.getElementById("outDir");
+      const elLogPath = document.getElementById("logPath");
+      const elPid = document.getElementById("pid");
+      const elReturnCode = document.getElementById("returnCode");
+      const elCommand = document.getElementById("command");
+      const elLogs = document.getElementById("logs");
+      const elStartBtn = document.getElementById("startBtn");
+
+      function renderJob(job) {
+        if (!job) {
+          elStatus.textContent = "状态：没有训练任务";
+          return;
+        }
+        jobId = job.id;
+        elJobId.textContent = `job: ${job.id}`;
+        elStatus.textContent = `状态：${job.status}`;
+        elProgressText.textContent = `${job.progress || 0}%`;
+        elProgressFill.style.width = `${job.progress || 0}%`;
+        elMessage.textContent = job.message || "-";
+        elOutDir.textContent = job.out_dir || "-";
+        elLogPath.textContent = job.log_path || "-";
+        elPid.textContent = job.pid || "-";
+        elReturnCode.textContent = job.return_code ?? "-";
+        elCommand.textContent = Array.isArray(job.command) ? job.command.join(" ") : "-";
+        elLogs.textContent = (job.logs || []).join("\n") || "等待训练输出...";
+        elLogs.scrollTop = elLogs.scrollHeight;
+        if (job.status === "succeeded" || job.status === "failed") {
+          stopPolling();
+        }
+      }
+
+      async function poll() {
+        try {
+          const url = jobId ? `/api/train/status/${encodeURIComponent(jobId)}` : "/api/train/latest";
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(await response.text());
+          const payload = await response.json();
+          const job = Object.prototype.hasOwnProperty.call(payload, "job") ? payload.job : payload;
+          renderJob(job);
+        } catch (error) {
+          elStatus.textContent = "状态：轮询失败";
+          elLogs.textContent = String(error);
+        }
+      }
+
+      function startPolling() {
+        stopPolling();
+        poll();
+        pollTimer = setInterval(poll, 1000);
+      }
+
+      function stopPolling() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      async function startTraining() {
+        elStartBtn.disabled = true;
+        elStatus.textContent = "状态：正在提交训练任务";
+        try {
+          const response = await fetch("/api/train/start", { method: "POST" });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          jobId = payload.job.id;
+          const url = new URL(window.location.href);
+          url.searchParams.set("job_id", jobId);
+          window.history.replaceState(null, "", url.toString());
+          renderJob(payload.job);
+          startPolling();
+        } catch (error) {
+          elStatus.textContent = "状态：启动失败";
+          elLogs.textContent = String(error);
+        } finally {
+          elStartBtn.disabled = false;
+        }
+      }
+
+      elStartBtn.addEventListener("click", startTraining);
+      startPolling();
+    </script>
+  </body>
+</html>
