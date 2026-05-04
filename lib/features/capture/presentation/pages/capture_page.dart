@@ -12,6 +12,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../../../app/providers.dart';
 import '../../../../core/config/app_constants.dart';
+import '../../../../core/rolling_buffer_clip.dart';
 import '../../../../core/models/action_event.dart';
 import '../../../../core/models/capture_location_metadata.dart';
 import '../../../../core/models/capture_settings.dart';
@@ -25,7 +26,7 @@ import '../../domain/patterns/action_pattern_catalog.dart';
 import '../../domain/patterns/capture_model_catalog.dart';
 import '../../../../platform_channels/capture_platform_channel.dart';
 import '../controllers/capture_controller.dart';
-import '../widgets/android_native_camera_preview.dart';
+import '../widgets/native_camera_preview.dart';
 
 class CapturePage extends ConsumerStatefulWidget {
   const CapturePage({super.key});
@@ -83,11 +84,15 @@ class _CapturePageState extends ConsumerState<CapturePage>
   StreamSubscription<dynamic>? _volumeKeySubscription;
   DateTime? _lastHardwareTriggerActionAt;
 
-  bool get _isCameraReady => _useNativeAndroidPipeline
+  bool get _isCameraReady => _useNativeCapturePipeline
       ? _nativePreviewReady
       : (_cameraController != null && _cameraController!.value.isInitialized);
 
-  bool get _useNativeAndroidPipeline => Platform.isAndroid;
+  bool get _useNativeCapturePipeline =>
+      Platform.isAndroid || Platform.isIOS;
+
+  /// Short RTMP status from native (e.g. live / reconnecting).
+  String? _rtmpStatusLabel;
   static const double _nativePoseAspectRatio = 9 / 16;
 
   bool _autoDetectionEnabled(CaptureSettings settings) {
@@ -95,7 +100,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _ensureNativeRollingBufferArmed() async {
-    if (!_useNativeAndroidPipeline) {
+    if (!_useNativeCapturePipeline) {
       return;
     }
     if (_isCaptureLocked()) {
@@ -224,7 +229,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!captureState.isRunning) {
       return;
     }
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       await _ensureNativeRollingBufferArmed();
       return;
     }
@@ -239,7 +244,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       _nativeCaptureSubscription = _capturePlatformChannel
           .captureEvents()
           .listen(_onNativeCaptureEvent);
@@ -321,6 +326,21 @@ class _CapturePageState extends ConsumerState<CapturePage>
         ref
             .read(captureControllerProvider.notifier)
             .setBufferingActive(event.isBuffering);
+      case NativeRtmpStateEvent():
+        setState(() {
+          final s = event.state;
+          if (s == 'live') {
+            _rtmpStatusLabel = 'RTMP live';
+          } else if (s == 'connecting' || s == 'reconnecting') {
+            _rtmpStatusLabel = 'RTMP $s';
+          } else if (s == 'error') {
+            _rtmpStatusLabel = event.message ?? 'RTMP error';
+          } else if (s == 'stopped' || s == 'idle') {
+            _rtmpStatusLabel = null;
+          } else {
+            _rtmpStatusLabel = 'RTMP $s';
+          }
+        });
       case NativeCaptureErrorEvent():
         debugPrint(
           '[CapturePage] native capture error '
@@ -371,7 +391,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (state == AppLifecycleState.inactive ||
           state == AppLifecycleState.hidden ||
           state == AppLifecycleState.paused) {
@@ -495,7 +515,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       }
 
       _enableAudio = hasMicrophonePermission;
-      if (_useNativeAndroidPipeline) {
+      if (_useNativeCapturePipeline) {
         setState(() => _isOpeningCamera = true);
         try {
           await ref.read(captureControllerProvider.notifier).startSession();
@@ -551,13 +571,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .setLastMessage(_captureCooldownMessage());
       return;
     }
-    final settings =
-        ref.read(settingsControllerProvider).valueOrNull ??
-        CaptureSettings.defaults();
-    await _capturePlatformChannel.startBuffering(
-      preRollMs: (settings.preRollSeconds * 1000).round(),
-      postRollMs: (settings.postRollSeconds * 1000).round(),
-    );
+    await ref.read(captureControllerProvider.notifier).startNativeRollingBuffer();
     _recordingStartedAt ??= DateTime.now();
     ref.read(captureControllerProvider.notifier).setRecording(true);
     ref
@@ -586,7 +600,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
-    final clipId = DateTime.now().microsecondsSinceEpoch.toString();
+    final rtmpSwingId = ref.read(captureControllerProvider).lastRtmpSwingId;
+    final clipId = (rtmpSwingId != null && rtmpSwingId.isNotEmpty)
+        ? rtmpSwingId
+        : DateTime.now().microsecondsSinceEpoch.toString();
     final outputPath = await _buildClipPath(clipId);
     final effectivePreRollMs = _eventPreRollMs(event);
     final effectivePostRollMs = _eventPostRollMs(event);
@@ -644,6 +661,23 @@ class _CapturePageState extends ConsumerState<CapturePage>
             savedToGallery: false,
           );
 
+      final settings =
+          ref.read(settingsControllerProvider).valueOrNull ??
+              CaptureSettings.defaults();
+      if (settings.rtmpEnabled && settings.rtmpUrl.trim().isNotEmpty) {
+        final base = settings.rtmpUrl.trim();
+        final clipUrl = '$base/swings/$clipId';
+        final w = event.score.clamp(0.0, 1.0);
+        unawaited(
+          _capturePlatformChannel.publishSwingClip(
+            url: clipUrl,
+            filePath: finalPath,
+            swingId: clipId,
+            weight: w,
+          ),
+        );
+      }
+
       final savedToGallery = await _maybeSaveToGallery(finalPath);
       if (savedToGallery) {
         ref
@@ -687,7 +721,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   Future<void> _openSelectedCamera({
     bool forceStartCapturePipeline = false,
   }) async {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       return;
     }
     if (_selectedCameraIndex < 0 || _selectedCameraIndex >= _cameras.length) {
@@ -717,10 +751,16 @@ class _CapturePageState extends ConsumerState<CapturePage>
     setState(() => _isOpeningCamera = true);
 
     final previous = _cameraController;
+    final mediaSettings =
+        ref.read(settingsControllerProvider).valueOrNull ??
+            CaptureSettings.defaults();
+    final fpsMode = mediaSettings.videoFpsMode;
     final controller = CameraController(
       _cameras[_selectedCameraIndex],
       _resolutionPreset,
       enableAudio: _enableAudio,
+      fps: fpsMode.iosCaptureFps,
+      videoBitrate: fpsMode.iosVideoBitrate,
       imageFormatGroup: Platform.isIOS
           ? ImageFormatGroup.bgra8888
           : ImageFormatGroup.nv21,
@@ -804,7 +844,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _disposeCameraController() async {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       await _disposeNativeSession();
       return;
     }
@@ -849,7 +889,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _restoreCameraController() async {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       await _restoreNativeSession();
       return;
     }
@@ -864,7 +904,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!ref.read(captureControllerProvider).hasCameraPermission) {
       return;
     }
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       await _restoreNativeSession();
       return;
     }
@@ -924,7 +964,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
     final clamped = value.clamp(_minZoom!, _maxZoom!);
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       try {
         await _capturePlatformChannel.setZoomRatio(clamped);
         if (mounted) {
@@ -1079,7 +1119,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     final pendingEvent = _pendingSwingEvent ?? state.lastActionEvent;
     final event = pendingEvent ?? _fallbackSwingEvent();
     _armCaptureLock(event);
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (state.isRecording) {
         _pendingSwingEvent = event;
         _scheduleAutoFinalize(event);
@@ -1166,7 +1206,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
     final event = _fallbackSwingEvent();
     _armCaptureLock(event);
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       final captureState = ref.read(captureControllerProvider);
       if (!captureState.isRunning) {
         await _toggleSession();
@@ -1246,7 +1286,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (previous?.detectionState.stage != DetectionStage.swingDetected &&
           next.detectionState.stage == DetectionStage.swingDetected) {
         _pendingSwingEvent =
@@ -1298,7 +1338,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (captureState.isRunning) {
         if (captureState.isRecording) {
           await _stopNativeRollingBuffer();
@@ -1339,7 +1379,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (!sessionState.isRunning) {
         await _toggleSession();
         if (!ref.read(captureControllerProvider).isRunning) {
@@ -1418,7 +1458,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (_isFinalizingBufferedClip) {
       return;
     }
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       _isFinalizingBufferedClip = true;
       await _saveNativeBufferedSwing();
       return;
@@ -1636,7 +1676,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _switchCamera() async {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (_isOpeningCamera) {
         return;
       }
@@ -1734,9 +1774,12 @@ class _CapturePageState extends ConsumerState<CapturePage>
     required int preRollMs,
     required int postRollMs,
   }) {
-    final clipStartMs = (triggerMs - preRollMs).clamp(0, totalDurationMs);
-    final clipEndMs = (triggerMs + postRollMs).clamp(0, totalDurationMs);
-    return (clipEndMs - clipStartMs).clamp(0, totalDurationMs);
+    return rollingClipDurationMs(
+      totalDurationMs: totalDurationMs,
+      triggerMs: triggerMs,
+      preRollMs: preRollMs,
+      postRollMs: postRollMs,
+    );
   }
 
   Future<void> _forwardPoseFrame(PoseFrame? frame) async {
@@ -1783,9 +1826,11 @@ class _CapturePageState extends ConsumerState<CapturePage>
         outputPath: outputPath,
         clipId: clipId,
         videoPath: videoPath,
-        capturePipeline: _useNativeAndroidPipeline
-            ? 'native_android_buffer'
-            : 'flutter_camera_buffer',
+        capturePipeline: !_useNativeCapturePipeline
+            ? 'flutter_camera_buffer'
+            : (Platform.isIOS
+                  ? 'native_ios_buffer'
+                  : 'native_android_buffer'),
         cameraFacing: _cameraFacingLabel(),
         clipStartAt: clipStartAt,
         clipEndAt: clipEndAt,
@@ -1812,16 +1857,20 @@ class _CapturePageState extends ConsumerState<CapturePage>
     required int preRollMs,
     required int postRollMs,
   }) {
-    final clipStartMs = (triggerMs - preRollMs).clamp(0, totalDurationMs);
-    final clipEndMs = (triggerMs + postRollMs).clamp(0, totalDurationMs);
+    final bounds = rollingClipBoundsMs(
+      totalDurationMs: totalDurationMs,
+      triggerMs: triggerMs,
+      preRollMs: preRollMs,
+      postRollMs: postRollMs,
+    );
     return (
-      startAt: bufferStartedAt.add(Duration(milliseconds: clipStartMs)),
-      endAt: bufferStartedAt.add(Duration(milliseconds: clipEndMs)),
+      startAt: bufferStartedAt.add(Duration(milliseconds: bounds.clipStartMs)),
+      endAt: bufferStartedAt.add(Duration(milliseconds: bounds.clipEndMs)),
     );
   }
 
   String _cameraFacingLabel() {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       return _nativeLensDirection;
     }
     final controller = _cameraController;
@@ -1847,8 +1896,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
                 _selectedCameraIndex >= 0 &&
                 _selectedCameraIndex < _cameras.length;
             final currentLens = _lensLabelForUi();
-            final resolutionSubtitle = _useNativeAndroidPipeline
-                ? 'CameraX HD (native)'
+            final resolutionSubtitle = _useNativeCapturePipeline
+                ? (Platform.isAndroid
+                    ? 'CameraX HD (native)'
+                    : 'AVFoundation (native)')
                 : _resolutionLabel(_resolutionPreset);
 
             return SafeArea(
@@ -1890,7 +1941,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                             onSelected:
                                 hasActiveCamera &&
                                     !_isOpeningCamera &&
-                                    !_useNativeAndroidPipeline
+                                    !_useNativeCapturePipeline
                                 ? (selected) async {
                                     if (!selected ||
                                         _resolutionPreset == preset) {
@@ -1985,6 +2036,31 @@ class _CapturePageState extends ConsumerState<CapturePage>
     ) {
       _handleCaptureStateTransition(previous, next);
     });
+    ref.listen<AsyncValue<CaptureSettings>>(settingsControllerProvider, (
+      previous,
+      next,
+    ) {
+      final prev = previous?.valueOrNull;
+      final curr = next.valueOrNull;
+      if (prev == null || curr == null) {
+        return;
+      }
+      if (prev.videoFpsMode == curr.videoFpsMode) {
+        return;
+      }
+      if (_useNativeCapturePipeline) {
+        final recording = ref.read(captureControllerProvider).isRecording;
+        if (recording) {
+          unawaited(() async {
+            await _stopNativeRollingBuffer();
+            await _ensureNativeRollingBufferArmed();
+          }());
+        }
+      } else if (_cameraController != null && !_useNativeCapturePipeline) {
+        unawaited(_openSelectedCamera());
+      }
+    });
+
     ref.listen<int>(appTabProvider, (previous, next) {
       if (Platform.isAndroid) {
         unawaited(
@@ -2029,7 +2105,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (_useNativeAndroidPipeline || _cameras.length > 1)
+                    if (_useNativeCapturePipeline || _cameras.length > 1)
                       Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: IconButton.filledTonal(
@@ -2072,6 +2148,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                 child: _StatusPanel(
                   detection: detection,
                   message: state.lastMessage,
+                  rtmpLabel: _rtmpStatusLabel,
                 ),
               ),
               Positioned(
@@ -2092,7 +2169,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   String _lensLabelForUi() {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       if (!_nativePreviewReady) {
         return 'Camera loading';
       }
@@ -2105,7 +2182,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Widget _buildPreview(CaptureSessionState state) {
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       return _buildNativePreview(state);
     }
 
@@ -2158,7 +2235,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!state.detectionState.showDebugOverlay || !state.hasCameraPermission) {
       return false;
     }
-    if (_useNativeAndroidPipeline) {
+    if (_useNativeCapturePipeline) {
       return _nativePreviewReady;
     }
     final c = _cameraController;
@@ -2196,7 +2273,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       children: [
         const ColoredBox(
           color: Colors.black,
-          child: AndroidNativeCameraPreview(),
+          child: NativeCameraPreview(),
         ),
         if (overlay != null) overlay,
         if (showLoadingOverlay)
@@ -2519,10 +2596,15 @@ class _StatusBadge extends StatelessWidget {
 }
 
 class _StatusPanel extends StatelessWidget {
-  const _StatusPanel({required this.detection, required this.message});
+  const _StatusPanel({
+    required this.detection,
+    required this.message,
+    this.rtmpLabel,
+  });
 
   final DetectionState detection;
   final String? message;
+  final String? rtmpLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -2570,6 +2652,13 @@ class _StatusPanel extends StatelessWidget {
                     context,
                   ).textTheme.bodySmall?.copyWith(color: Colors.white70),
                 ),
+                if (rtmpLabel != null && rtmpLabel!.isNotEmpty)
+                  Text(
+                    rtmpLabel!,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: Colors.lightGreenAccent),
+                  ),
               ],
             ),
           ],

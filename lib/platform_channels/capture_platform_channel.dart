@@ -12,6 +12,7 @@ sealed class NativeCaptureEvent {
       'pose' => NativePoseEvent.fromMap(map),
       'camera_state' => NativeCameraStateEvent.fromMap(map),
       'buffer_state' => NativeBufferStateEvent.fromMap(map),
+      'rtmp_state' => NativeRtmpStateEvent.fromMap(map),
       'error' => NativeCaptureErrorEvent.fromMap(map),
       _ => NativeCaptureUnknownEvent(type),
     };
@@ -95,19 +96,66 @@ class NativeBufferStateEvent extends NativeCaptureEvent {
     required this.isBuffering,
     this.completedSegmentCount,
     this.segmentSliceMs,
+    this.targetFps,
+    this.achievedFps,
+    this.highSpeed,
   });
 
   factory NativeBufferStateEvent.fromMap(Map<Object?, Object?> map) {
+    final explicitTarget = (map['targetFps'] as num?)?.toDouble();
+    final legacyNominal = map['nominalTargetFps'] as num?;
+    final target = explicitTarget ??
+        (legacyNominal != null && legacyNominal.toInt() >= 0
+            ? legacyNominal.toDouble()
+            : null);
+    final legacyHigh = map['highFpsEnabled'] as bool?;
     return NativeBufferStateEvent(
       isBuffering: map['buffering'] as bool? ?? false,
       completedSegmentCount: (map['completedSegmentCount'] as num?)?.toInt(),
       segmentSliceMs: (map['segmentSliceMs'] as num?)?.toInt(),
+      targetFps: target,
+      achievedFps: (map['achievedFps'] as num?)?.toDouble(),
+      highSpeed: map['highSpeed'] as bool? ?? legacyHigh,
     );
   }
 
   final bool isBuffering;
   final int? completedSegmentCount;
   final int? segmentSliceMs;
+
+  /// Nominal target fps from native (may exceed what the device achieves).
+  final double? targetFps;
+
+  /// Last observed container metadata after a segment finalized (nominal track rate).
+  final double? achievedFps;
+
+  /// High-speed / non-standard rolling-buffer profile is active.
+  final bool? highSpeed;
+}
+
+/// RTMP publish lifecycle from native (Android RootEncoder / iOS HaishinKit).
+class NativeRtmpStateEvent extends NativeCaptureEvent {
+  const NativeRtmpStateEvent({
+    required this.state,
+    this.bitrateBps,
+    this.droppedVideoFrames,
+    this.message,
+  });
+
+  factory NativeRtmpStateEvent.fromMap(Map<Object?, Object?> map) {
+    return NativeRtmpStateEvent(
+      state: map['state'] as String? ?? 'idle',
+      bitrateBps: (map['bitrateBps'] as num?)?.toInt(),
+      droppedVideoFrames: (map['droppedVideoFrames'] as num?)?.toInt(),
+      message: map['message'] as String?,
+    );
+  }
+
+  /// idle | connecting | live | reconnecting | error | stopped
+  final String state;
+  final int? bitrateBps;
+  final int? droppedVideoFrames;
+  final String? message;
 }
 
 class NativeCaptureErrorEvent extends NativeCaptureEvent {
@@ -124,7 +172,7 @@ class NativeCaptureErrorEvent extends NativeCaptureEvent {
   final String message;
 }
 
-/// Method-channel contract for the native camera, ring buffer, and gallery pipeline.
+/// Method-channel contract for the native camera, ring buffer, gallery, and RTMP.
 class CapturePlatformChannel {
   const CapturePlatformChannel();
 
@@ -135,8 +183,11 @@ class CapturePlatformChannel {
     'swingcapture/capture_events',
   );
 
+  static bool get _useNativeEvents =>
+      Platform.isAndroid || Platform.isIOS;
+
   Stream<NativeCaptureEvent> captureEvents() {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return const Stream<NativeCaptureEvent>.empty();
     }
     return _eventChannel.receiveBroadcastStream().map((dynamic event) {
@@ -161,28 +212,28 @@ class CapturePlatformChannel {
   }
 
   Future<void> startPreview() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('startPreview');
   }
 
   Future<void> stopPreview() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('stopPreview');
   }
 
   Future<void> startDetection() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('startDetection');
   }
 
   Future<void> stopDetection() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('stopDetection');
@@ -191,18 +242,20 @@ class CapturePlatformChannel {
   Future<void> startBuffering({
     required int preRollMs,
     required int postRollMs,
+    required String videoFpsMode,
   }) async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('startBuffering', {
       'preRollMs': preRollMs,
       'postRollMs': postRollMs,
+      'videoFpsMode': videoFpsMode,
     });
   }
 
   Future<void> stopBuffering() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('stopBuffering');
@@ -214,7 +267,7 @@ class CapturePlatformChannel {
     required int preRollMs,
     required int postRollMs,
   }) async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return null;
     }
     return _methodChannel.invokeMethod<String>('saveBufferedClip', {
@@ -226,17 +279,102 @@ class CapturePlatformChannel {
   }
 
   Future<Map<dynamic, dynamic>?> switchCamera() async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return null;
     }
     return _methodChannel.invokeMethod<Map<dynamic, dynamic>>('switchCamera');
   }
 
   Future<void> setZoomRatio(double ratio) async {
-    if (!Platform.isAndroid) {
+    if (!_useNativeEvents) {
       return;
     }
     await _methodChannel.invokeMethod<void>('setZoomRatio', ratio);
+  }
+
+  Future<void> startRtmpStream({
+    required String url,
+    required int idleBitrateBps,
+    required int swingBitrateBps,
+  }) async {
+    if (!_useNativeEvents) {
+      return;
+    }
+    try {
+      await _methodChannel.invokeMethod<void>('startRtmpStream', {
+        'url': url,
+        'idleBitrateBps': idleBitrateBps,
+        'swingBitrateBps': swingBitrateBps,
+      });
+    } on MissingPluginException {
+      // Stub build.
+    }
+  }
+
+  Future<void> stopRtmpStream() async {
+    if (!_useNativeEvents) {
+      return;
+    }
+    try {
+      await _methodChannel.invokeMethod<void>('stopRtmpStream');
+    } on MissingPluginException {}
+  }
+
+  Future<void> setRtmpSwingBitrate({required bool swingActive}) async {
+    if (!_useNativeEvents) {
+      return;
+    }
+    try {
+      await _methodChannel.invokeMethod<void>('setRtmpSwingBitrate', {
+        'swingActive': swingActive,
+      });
+    } on MissingPluginException {}
+  }
+
+  Future<void> sendSwingMarker({
+    required String phase,
+    required String swingId,
+    required double weight,
+    required int triggerEpochMs,
+    required int preRollMs,
+    required int postRollMs,
+    double? score,
+    int? endedAtEpochMs,
+  }) async {
+    if (!_useNativeEvents) {
+      return;
+    }
+    try {
+      await _methodChannel.invokeMethod<void>('sendSwingMarker', {
+        'phase': phase,
+        'swingId': swingId,
+        'weight': weight,
+        'triggerEpochMs': triggerEpochMs,
+        'preRollMs': preRollMs,
+        'postRollMs': postRollMs,
+        if (score != null) 'score': score,
+        if (endedAtEpochMs != null) 'endedAtEpochMs': endedAtEpochMs,
+      });
+    } on MissingPluginException {}
+  }
+
+  Future<void> publishSwingClip({
+    required String url,
+    required String filePath,
+    required String swingId,
+    required double weight,
+  }) async {
+    if (!_useNativeEvents) {
+      return;
+    }
+    try {
+      await _methodChannel.invokeMethod<void>('publishSwingClip', {
+        'url': url,
+        'filePath': filePath,
+        'swingId': swingId,
+        'weight': weight,
+      });
+    } on MissingPluginException {}
   }
 
   Future<String?> saveClip({

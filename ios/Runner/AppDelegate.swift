@@ -4,32 +4,46 @@ import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
-  private let channelName = "swingcapture/capture"
+  private let captureChannelName = "swingcapture/capture"
+  private let captureEventsName = "swingcapture/capture_events"
+  private let previewTypeId = "swingcapture/native_preview"
+
+  private var capturePipeline: NativeCapturePipeline?
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
-    if let controller = window?.rootViewController as? FlutterViewController {
-      let channel = FlutterMethodChannel(
-        name: channelName,
-        binaryMessenger: controller.binaryMessenger
-      )
-      channel.setMethodCallHandler { call, result in
-        switch call.method {
-        case "startPreview", "stopPreview", "startDetection", "stopDetection",
-             "startBuffering", "createAlbumIfNeeded", "saveToGallery":
-          result(nil)
-        case "saveClip":
-          self.saveClip(call: call, result: result)
-        case "getAlbums":
-          result(["SwingCapture"])
-        default:
-          result(FlutterMethodNotImplemented)
-        }
-      }
+
+    guard let controller = window?.rootViewController as? FlutterViewController else {
+      return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
+
+    let pipeline = NativeCapturePipeline(eventSink: nil)
+    capturePipeline = pipeline
+
+    let methodChannel = FlutterMethodChannel(
+      name: captureChannelName,
+      binaryMessenger: controller.binaryMessenger
+    )
+    methodChannel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "saveClip" {
+        self?.saveClip(call: call, result: result)
+        return
+      }
+      pipeline.handle(call, result: result)
+    }
+
+    let events = FlutterEventChannel(
+      name: captureEventsName,
+      binaryMessenger: controller.binaryMessenger
+    )
+    events.setStreamHandler(CaptureEventStreamHandler(pipeline: pipeline))
+
+    let factory = NativePreviewViewFactory(pipeline: pipeline)
+    self.registrar(forPlugin: "com.swingcapture.native_preview")?.register(factory, withId: previewTypeId)
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -107,6 +121,24 @@ import UIKit
         }
       }
     }
+  }
+}
+
+private final class CaptureEventStreamHandler: NSObject, FlutterStreamHandler {
+  weak var pipeline: NativeCapturePipeline?
+
+  init(pipeline: NativeCapturePipeline) {
+    self.pipeline = pipeline
+  }
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    pipeline?.setEventSink(events)
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    pipeline?.setEventSink(nil)
+    return nil
   }
 }
 

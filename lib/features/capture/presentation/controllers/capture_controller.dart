@@ -28,6 +28,7 @@ class CaptureSessionState {
     this.hasMicrophonePermission = false,
     this.lastMessage,
     this.lastActionEvent,
+    this.lastRtmpSwingId,
   });
 
   final bool isRunning;
@@ -38,7 +39,11 @@ class CaptureSessionState {
   final String? lastMessage;
   final ActionEvent? lastActionEvent;
 
+  /// Matches AMF `swingId` / per-clip RTMP path segment for the latest swing event.
+  final String? lastRtmpSwingId;
+
   static const Object _keepActionEvent = Object();
+  static const Object _keepRtmpSwingId = Object();
 
   CaptureSessionState copyWith({
     bool? isRunning,
@@ -48,6 +53,7 @@ class CaptureSessionState {
     bool? hasMicrophonePermission,
     String? lastMessage,
     Object? lastActionEvent = _keepActionEvent,
+    Object? lastRtmpSwingId = _keepRtmpSwingId,
   }) {
     return CaptureSessionState(
       isRunning: isRunning ?? this.isRunning,
@@ -60,6 +66,9 @@ class CaptureSessionState {
       lastActionEvent: identical(lastActionEvent, _keepActionEvent)
           ? this.lastActionEvent
           : lastActionEvent as ActionEvent?,
+      lastRtmpSwingId: identical(lastRtmpSwingId, _keepRtmpSwingId)
+          ? this.lastRtmpSwingId
+          : lastRtmpSwingId as String?,
     );
   }
 }
@@ -77,6 +86,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
   bool _autoDetectionEnabled = true;
   DateTime? _hitterFirstSeenAt;
   DateTime? _lastNoPoseFrameLogAt;
+  Timer? _rtmpSwingEndTimer;
 
   @override
   CaptureSessionState build() {
@@ -136,6 +146,13 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     try {
       await _channel.startPreview();
       await _channel.startDetection();
+      if (settings.rtmpEnabled && settings.rtmpUrl.trim().isNotEmpty) {
+        await _channel.startRtmpStream(
+          url: settings.rtmpUrl.trim(),
+          idleBitrateBps: AppConstants.rtmpIdleVideoBitrateBps,
+          swingBitrateBps: AppConstants.rtmpSwingVideoBitrateBps,
+        );
+      }
     } on MissingPluginException {
       // Flutter camera preview handles the current MVP.
     } on PlatformException {
@@ -162,7 +179,10 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
   }
 
   Future<void> stopSession() async {
+    _rtmpSwingEndTimer?.cancel();
+    _rtmpSwingEndTimer = null;
     try {
+      await _channel.stopRtmpStream();
       await _channel.stopDetection();
       await _channel.stopPreview();
     } on MissingPluginException {
@@ -179,11 +199,24 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
       ),
       lastMessage: 'Capture stopped.',
       lastActionEvent: null,
+      lastRtmpSwingId: null,
     );
     for (final detector in _actionDetectors) {
       detector.reset();
     }
     _hitterFirstSeenAt = null;
+  }
+
+  /// Arms the Android CameraX rolling buffer with timing + FPS mode from settings.
+  Future<void> startNativeRollingBuffer() async {
+    final settings =
+        ref.read(settingsControllerProvider).valueOrNull ??
+        CaptureSettings.defaults();
+    await _channel.startBuffering(
+      preRollMs: (settings.preRollSeconds * 1000).round(),
+      postRollMs: (settings.postRollSeconds * 1000).round(),
+      videoFpsMode: settings.videoFpsMode.wireValue,
+    );
   }
 
   void setRecording(bool isRecording) {
@@ -437,6 +470,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
         statusText: hasHitter ? 'Ready' : 'Idle',
       ),
       lastActionEvent: null,
+      lastRtmpSwingId: null,
     );
   }
 
@@ -505,6 +539,45 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
         'reason=${event.reason}',
       );
     }
+    final swingId = DateTime.now().microsecondsSinceEpoch.toString();
+    final weight = event.score.clamp(0.0, 1.0);
+    _rtmpSwingEndTimer?.cancel();
+    unawaited(
+      _channel.setRtmpSwingBitrate(swingActive: true),
+    );
+    unawaited(
+      _channel.sendSwingMarker(
+        phase: 'start',
+        swingId: swingId,
+        weight: weight,
+        triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
+        preRollMs: event.preRollMs,
+        postRollMs: event.postRollMs,
+        score: event.score,
+      ),
+    );
+    final endAt = event.resolvedWindowEndAt;
+    final wait = endAt.difference(DateTime.now());
+    _rtmpSwingEndTimer = Timer(
+      wait.isNegative ? Duration.zero : wait,
+      () {
+        _rtmpSwingEndTimer = null;
+        unawaited(
+          _channel.sendSwingMarker(
+            phase: 'end',
+            swingId: swingId,
+            weight: weight,
+            triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
+            preRollMs: event.preRollMs,
+            postRollMs: event.postRollMs,
+            score: event.score,
+            endedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+        unawaited(_channel.setRtmpSwingBitrate(swingActive: false));
+      },
+    );
+
     state = state.copyWith(
       detectionState: state.detectionState.copyWith(
         stage: DetectionStage.swingDetected,
@@ -513,6 +586,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
       lastMessage:
           '${event.label} locked. Score ${event.score.toStringAsFixed(2)}.',
       lastActionEvent: event,
+      lastRtmpSwingId: swingId,
     );
   }
 

@@ -82,7 +82,12 @@ class MainActivity : FlutterActivity() {
                 "stopBuffering",
                 "saveBufferedClip",
                 "switchCamera",
-                "setZoomRatio" -> nativeCapturePipeline.handleMethodCall(call, result)
+                "setZoomRatio",
+                "startRtmpStream",
+                "stopRtmpStream",
+                "setRtmpSwingBitrate",
+                "sendSwingMarker",
+                "publishSwingClip" -> nativeCapturePipeline.handleMethodCall(call, result)
                 "getAlbums" -> result.success(listOf("SwingCapture"))
                 else -> result.notImplemented()
             }

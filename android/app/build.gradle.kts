@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.example.swingcapture"
-    compileSdk = 35
+    compileSdk = 36
     // Match plugins (camera_android_camerax, gal, path_provider_android, etc.)
     ndkVersion = "27.0.12077973"
 
@@ -25,8 +25,8 @@ android {
         applicationId = "com.example.swingcapture"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21
-        targetSdk = 35
+        minSdk = 24
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -36,6 +36,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
@@ -45,11 +49,13 @@ flutter {
 }
 
 dependencies {
-    implementation("androidx.camera:camera-camera2:1.4.2")
-    implementation("androidx.camera:camera-core:1.4.2")
-    implementation("androidx.camera:camera-lifecycle:1.4.2")
-    implementation("androidx.camera:camera-video:1.4.2")
-    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("com.github.pedroSG94.RootEncoder:library:2.7.2")
+    implementation("com.github.pedroSG94.RootEncoder:extra-sources:2.7.2")
+    implementation("androidx.camera:camera-camera2:1.5.1")
+    implementation("androidx.camera:camera-core:1.5.1")
+    implementation("androidx.camera:camera-lifecycle:1.5.1")
+    implementation("androidx.camera:camera-video:1.5.1")
+    implementation("androidx.camera:camera-view:1.5.1")
     implementation("com.google.mlkit:pose-detection:18.0.0-beta5")
     implementation("com.google.mlkit:pose-detection-accurate:18.0.0-beta5")
     implementation("com.google.guava:guava:33.3.1-android")

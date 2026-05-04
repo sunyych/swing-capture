@@ -77,6 +77,62 @@ class _SettingsView extends StatelessWidget {
             onChanged: (value) =>
                 onChanged(settings.copyWith(swingCooldownMs: value.round())),
           ),
+          _RtmpSettingsCard(settings: settings, onChanged: onChanged),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Rolling buffer video frame rate',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Higher fps improves slow-motion clips but increases heat, battery use, and storage. Actual fps depends on the device; many phones fall back to 30–60 fps.',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.white70,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<VideoFpsMode>(
+                    key: ValueKey(settings.videoFpsMode),
+                    initialValue: settings.videoFpsMode,
+                    decoration: const InputDecoration(
+                      labelText: 'Target recording fps',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: VideoFpsMode.standard,
+                        child: Text('Standard (~30 fps)'),
+                      ),
+                      DropdownMenuItem(
+                        value: VideoFpsMode.high120,
+                        child: Text('120 fps'),
+                      ),
+                      DropdownMenuItem(
+                        value: VideoFpsMode.high240,
+                        child: Text('240 fps'),
+                      ),
+                      DropdownMenuItem(
+                        value: VideoFpsMode.maxSupported,
+                        child: Text('Maximum supported'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      onChanged(settings.copyWith(videoFpsMode: value));
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
           SwitchListTile.adaptive(
             value: settings.showDebugSkeleton,
             title: const Text('Show debug skeleton'),
@@ -157,7 +213,8 @@ class _CaptureModelCard extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
-              value: selectedModel.id,
+              key: ValueKey(selectedModel.id),
+              initialValue: selectedModel.id,
               decoration: const InputDecoration(
                 labelText: 'TF model version',
                 border: OutlineInputBorder(),
@@ -183,6 +240,93 @@ class _CaptureModelCard extends StatelessWidget {
               style: Theme.of(
                 context,
               ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RtmpSettingsCard extends StatefulWidget {
+  const _RtmpSettingsCard({
+    required this.settings,
+    required this.onChanged,
+  });
+
+  final CaptureSettings settings;
+  final ValueChanged<CaptureSettings> onChanged;
+
+  @override
+  State<_RtmpSettingsCard> createState() => _RtmpSettingsCardState();
+}
+
+class _RtmpSettingsCardState extends State<_RtmpSettingsCard> {
+  late TextEditingController _urlController;
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController = TextEditingController(text: widget.settings.rtmpUrl);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RtmpSettingsCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings.rtmpUrl != widget.settings.rtmpUrl &&
+        widget.settings.rtmpUrl != _urlController.text) {
+      _urlController.text = widget.settings.rtmpUrl;
+    }
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'RTMP / RTMPS output',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Live stream and per-swing clip republish. Put your full URL here (credentials and stream key can be embedded), e.g. rtmps://user:pass@host/app/live_key. Swing windows are tagged with AMF onSwingStart / onSwingEnd metadata on the live stream.',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Colors.white70,
+                  ),
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              value: widget.settings.rtmpEnabled,
+              title: const Text('Enable RTMP output'),
+              subtitle: const Text(
+                'When on, the capture session publishes a live stream and optional swing clips.',
+              ),
+              onChanged: (v) => widget.onChanged(
+                widget.settings.copyWith(rtmpEnabled: v),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _urlController,
+              enabled: widget.settings.rtmpEnabled,
+              decoration: const InputDecoration(
+                labelText: 'RTMP URL',
+                hintText: 'rtmps://user:pass@host/app/streamKey',
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (v) =>
+                  widget.onChanged(widget.settings.copyWith(rtmpUrl: v)),
             ),
           ],
         ),

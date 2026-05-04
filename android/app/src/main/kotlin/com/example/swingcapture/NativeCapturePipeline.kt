@@ -7,9 +7,14 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
+import android.media.Image
 import android.media.MediaMuxer
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Range
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -29,7 +34,6 @@ import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Observer
 import com.google.mlkit.vision.common.InputImage
@@ -77,7 +81,7 @@ class NativeCapturePipeline(
     )
 
     private var eventSink: EventChannel.EventSink? = null
-    private var previewView: PreviewView? = null
+    private var previewView: TextureView? = null
     private var previewRequested = false
     private var detectionEnabled = false
     private var isProcessingPose = false
@@ -93,10 +97,20 @@ class NativeCapturePipeline(
     private var bufferingEnabled = false
     private var preRollMs = 2000L
     private var postRollMs = 2000L
+    /**
+     * Wire value from Dart [VideoFpsMode] (`standard`, `fps120`, `fps240`, `maxSupported`).
+     * Legacy `VideoFpsPreference` enum names are still accepted for rebinds.
+     */
+    private var videoFpsMode: String = "standard"
+    private var lastAchievedFps: Double? = null
     /** Wall-clock slice length for each rolling file; recomputed when buffering arms. */
     private var segmentDurationMs = 1000L
 
     private val mergeExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val clipRtmpExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    private var rtmpLive: RtmpLiveBroadcaster? = null
+    private val swingClipPublisher = SwingClipRtmpPublisher(activity, clipRtmpExecutor)
 
     private val zoomObserver = Observer<ZoomState> { sendCameraState() }
     private val completedSegments = ArrayDeque<BufferedSegment>()
@@ -148,7 +162,40 @@ class NativeCapturePipeline(
                 if (requestedPostRollMs != null) {
                     postRollMs = requestedPostRollMs.coerceAtLeast(0L)
                 }
-                startBuffering()
+                val requestedFpsMode =
+                    args?.get("videoFpsMode") as? String
+                        ?: args?.get("videoFpsPreference") as? String
+                val newMode = requestedFpsMode ?: videoFpsMode
+                val modeChanged = newMode != videoFpsMode
+                videoFpsMode = newMode
+
+                bufferingEnabled = true
+                segmentDurationMs = computeSegmentSliceMs(preRollMs, postRollMs)
+
+                val canRebuild =
+                    modeChanged &&
+                        previewRequested &&
+                        cameraProvider != null &&
+                        previewView != null
+
+                if (canRebuild) {
+                    if (currentRecording != null) {
+                        sealCurrentSegment(restartAfterFinalize = false) {
+                            mainHandler.post {
+                                bindUseCasesIfReady()
+                                sendBufferState()
+                            }
+                        }
+                    } else {
+                        bindUseCasesIfReady()
+                        sendBufferState()
+                    }
+                } else {
+                    sendBufferState()
+                    if (currentRecording == null) {
+                        startNewSegment()
+                    }
+                }
                 result.success(null)
             }
             "stopBuffering" -> {
@@ -197,14 +244,168 @@ class NativeCapturePipeline(
                 sendCameraState()
                 result.success(null)
             }
+            "startRtmpStream" -> {
+                val args = call.arguments as? Map<*, *>
+                val url = args?.get("url") as? String
+                val idleBr = (args?.get("idleBitrateBps") as? Number)?.toInt() ?: 2_500_000
+                val swingBr = (args?.get("swingBitrateBps") as? Number)?.toInt() ?: 4_500_000
+                if (url.isNullOrBlank()) {
+                    result.error("invalid_args", "startRtmpStream requires url", null)
+                    return
+                }
+                val tv = previewView
+                if (tv == null) {
+                    result.error("no_preview", "Preview TextureView not attached yet.", null)
+                    return
+                }
+                mainHandler.post {
+                    try {
+                        stopBuffering(discardSegments = false)
+                        cameraProvider?.unbindAll()
+                        camera = null
+                        previewUseCase = null
+                        analysisUseCase = null
+                        videoCapture = null
+                        recorder = null
+                        currentRecording = null
+                        currentSegmentPath = null
+                        currentSegmentFinalizeCallback = null
+
+                        val checker = RtmpConnectChecker { m ->
+                            mainHandler.post { eventSink?.success(m) }
+                        }
+                        rtmpLive?.stop()
+                        val live = RtmpLiveBroadcaster(activity, checker)
+                        rtmpLive = live
+                        live.updateBitrates(idleBr, swingBr)
+                        if (!live.start(tv, url, idleBr, swingBr)) {
+                            rtmpLive = null
+                            result.error("rtmp_start_failed", "Could not start RTMP encoder.", null)
+                            bindUseCasesIfReady()
+                            return@post
+                        }
+                        live.attachPoseProcessor { image -> onRtmpPoseImage(image) }
+                        result.success(null)
+                    } catch (e: Exception) {
+                        rtmpLive = null
+                        result.error("rtmp_start_failed", e.message, null)
+                        bindUseCasesIfReady()
+                    }
+                }
+            }
+            "stopRtmpStream" -> {
+                mainHandler.post {
+                    rtmpLive?.stop()
+                    rtmpLive = null
+                    bindUseCasesIfReady()
+                    eventSink?.success(
+                        mapOf(
+                            "type" to "rtmp_state",
+                            "state" to "stopped",
+                        ),
+                    )
+                    result.success(null)
+                }
+            }
+            "setRtmpSwingBitrate" -> {
+                val args = call.arguments as? Map<*, *>
+                val active = args?.get("swingActive") as? Boolean ?: false
+                rtmpLive?.setSwingBitrateActive(active)
+                result.success(null)
+            }
+            "sendSwingMarker" -> {
+                val args = call.arguments as? Map<*, *>
+                val phase = args?.get("phase") as? String ?: ""
+                val swingId = args?.get("swingId") as? String ?: ""
+                val weight = (args?.get("weight") as? Number)?.toDouble() ?: 0.0
+                val triggerEpochMs = (args?.get("triggerEpochMs") as? Number)?.toLong() ?: 0L
+                val preRollMs = (args?.get("preRollMs") as? Number)?.toInt() ?: 0
+                val postRollMs = (args?.get("postRollMs") as? Number)?.toInt() ?: 0
+                val score = (args?.get("score") as? Number)?.toDouble()
+                val endedAt = (args?.get("endedAtEpochMs") as? Number)?.toLong()
+                val w = weight.coerceIn(0.0, 1.0)
+                val sc = (score ?: weight).coerceIn(0.0, 1.0)
+                when (phase) {
+                    "start" -> {
+                        rtmpLive?.sendSwingDataFrame(
+                            "onSwingStart",
+                            mapOf(
+                                "swingId" to swingId,
+                                "weight" to w,
+                                "score" to sc,
+                                "triggerEpochMs" to triggerEpochMs.toDouble(),
+                                "preRollMs" to preRollMs.toDouble(),
+                                "postRollMs" to postRollMs.toDouble(),
+                            ),
+                        )
+                    }
+                    "end" -> {
+                        rtmpLive?.sendSwingDataFrame(
+                            "onSwingEnd",
+                            mapOf(
+                                "swingId" to swingId,
+                                "weight" to w,
+                                "endedAtEpochMs" to (endedAt ?: System.currentTimeMillis()).toDouble(),
+                            ),
+                        )
+                    }
+                }
+                result.success(null)
+            }
+            "publishSwingClip" -> {
+                val args = call.arguments as? Map<*, *>
+                val url = args?.get("url") as? String
+                val filePath = args?.get("filePath") as? String
+                val swingId = args?.get("swingId") as? String ?: ""
+                val weight = (args?.get("weight") as? Number)?.toDouble() ?: 0.0
+                if (url.isNullOrBlank() || filePath.isNullOrBlank()) {
+                    result.error("invalid_args", "publishSwingClip requires url and filePath", null)
+                    return
+                }
+                swingClipPublisher.publish(
+                    filePath = filePath,
+                    url = url,
+                    swingId = swingId,
+                    weight = weight,
+                ) { ok, err ->
+                    mainHandler.post {
+                        if (ok) {
+                            result.success(null)
+                        } else {
+                            result.error("clip_rtmp_failed", err ?: "unknown", null)
+                        }
+                    }
+                }
+            }
             else -> result.notImplemented()
         }
     }
 
-    fun attachPreviewView(view: PreviewView) {
+    fun attachPreviewView(view: TextureView) {
         previewView = view.apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            isOpaque = true
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(
+                    surface: android.graphics.SurfaceTexture,
+                    width: Int,
+                    height: Int,
+                ) {
+                    ensureCameraProvider()
+                    bindUseCasesIfReady()
+                }
+
+                override fun onSurfaceTextureSizeChanged(
+                    surface: android.graphics.SurfaceTexture,
+                    width: Int,
+                    height: Int,
+                ) = Unit
+
+                override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean {
+                    return false
+                }
+
+                override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
+            }
         }
         // Surface must exist before bind; Flutter may build the PlatformView slightly
         // after startPreview(), so always arm preview when the view attaches.
@@ -213,13 +414,15 @@ class NativeCapturePipeline(
         bindUseCasesIfReady()
     }
 
-    fun detachPreviewView(view: PreviewView) {
+    fun detachPreviewView(view: TextureView) {
         if (previewView === view) {
             previewView = null
         }
     }
 
     fun dispose() {
+        rtmpLive?.stop()
+        rtmpLive = null
         stopBuffering(discardSegments = true)
         previewRequested = false
         detectionEnabled = false
@@ -231,9 +434,12 @@ class NativeCapturePipeline(
         poseDetector.close()
         analysisExecutor.shutdown()
         mergeExecutor.shutdown()
+        clipRtmpExecutor.shutdown()
     }
 
     private fun stopPreview() {
+        rtmpLive?.stop()
+        rtmpLive = null
         previewRequested = false
         stopBuffering(discardSegments = true)
         camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
@@ -266,7 +472,44 @@ class NativeCapturePipeline(
         )
     }
 
+    private fun isHighFpsRollingBuffer(): Boolean {
+        return videoFpsMode != "standard"
+    }
+
+    private fun nominalTargetFpsForPreference(): Int {
+        return when (videoFpsMode) {
+            "fps60" -> 60
+            "fps120" -> 120
+            "fps240" -> 240
+            "maxSupported" -> 240
+            else -> 30
+        }
+    }
+
+    /**
+     * Requested fps [Range] for [VideoCapture]. Null keeps CameraX / device defaults (~30).
+     */
+    private fun videoFrameRateRange(): Range<Int>? {
+        return when (videoFpsMode) {
+            "standard" -> null
+            "fps60" -> Range(60, 60)
+            "fps120" -> Range(120, 120)
+            "fps240" -> Range(240, 240)
+            "maxSupported" -> Range(60, 240)
+            else -> null
+        }
+    }
+
+    private fun encoderBitrateBitsPerSecond(): Int {
+        val fps = nominalTargetFpsForPreference()
+        val base = 12_000_000
+        return (base * fps / 30).coerceIn(8_000_000, 80_000_000)
+    }
+
     private fun bindUseCasesIfReady() {
+        if (rtmpLive != null) {
+            return
+        }
         val provider = cameraProvider ?: return
         val view = previewView ?: return
         if (!previewRequested) {
@@ -281,7 +524,18 @@ class NativeCapturePipeline(
                 .setTargetAspectRatio(AspectRatio.RATIO_16_9)
                 .build()
                 .also { preview ->
-                    preview.surfaceProvider = view.surfaceProvider
+                    preview.setSurfaceProvider { request ->
+                        val texture = view.surfaceTexture
+                        if (texture == null) {
+                            return@setSurfaceProvider
+                        }
+                        val size = request.resolution
+                        texture.setDefaultBufferSize(size.width, size.height)
+                        val surface = android.view.Surface(texture)
+                        request.provideSurface(surface, mainExecutor) {
+                            surface.release()
+                        }
+                    }
                 }
 
             analysisUseCase = ImageAnalysis.Builder()
@@ -294,16 +548,29 @@ class NativeCapturePipeline(
                     }
                 }
 
-            recorder = Recorder.Builder()
-                .setQualitySelector(
-                    QualitySelector.from(
-                        Quality.HD,
-                        FallbackStrategy.lowerQualityOrHigherThan(Quality.HD),
-                    ),
+            val qualitySelector = if (videoFpsMode == "maxSupported") {
+                QualitySelector.from(
+                    Quality.FHD,
+                    FallbackStrategy.lowerQualityOrHigherThan(Quality.HD),
                 )
-                .build()
+            } else {
+                QualitySelector.from(
+                    Quality.HD,
+                    FallbackStrategy.lowerQualityOrHigherThan(Quality.HD),
+                )
+            }
+            val recorderBuilder = Recorder.Builder()
+                .setQualitySelector(qualitySelector)
+            if (isHighFpsRollingBuffer()) {
+                recorderBuilder.setTargetVideoEncodingBitRate(encoderBitrateBitsPerSecond())
+            }
+            recorder = recorderBuilder.build()
 
-            videoCapture = VideoCapture.withOutput(recorder!!)
+            val videoBuilder = VideoCapture.Builder(recorder!!)
+            videoFrameRateRange()?.let { range ->
+                videoBuilder.setTargetFrameRate(range)
+            }
+            videoCapture = videoBuilder.build()
 
             val selector = CameraSelector.Builder()
                 .requireLensFacing(lensFacing)
@@ -330,23 +597,16 @@ class NativeCapturePipeline(
         }
     }
 
-    private fun startBuffering() {
-        bufferingEnabled = true
-        segmentDurationMs = computeSegmentSliceMs(preRollMs, postRollMs)
-        sendBufferState()
-        if (currentRecording == null) {
-            startNewSegment()
-        }
-    }
-
     /**
      * Finer slices improve pre-roll resolution; coarser slices reduce muxer churn.
      * Targets ~4–6 segments covering the full ring window.
      */
     private fun computeSegmentSliceMs(preRollMs: Long, postRollMs: Long): Long {
         val ringWindow = (preRollMs + postRollMs + 1500L).coerceAtLeast(3000L)
-        val slice = (ringWindow / 5).coerceIn(600L, 2800L)
-        return slice
+        val divisor = if (isHighFpsRollingBuffer()) 6 else 5
+        val minSlice = if (isHighFpsRollingBuffer()) 400L else 600L
+        val maxSlice = if (isHighFpsRollingBuffer()) 2000L else 2800L
+        return (ringWindow / divisor).coerceIn(minSlice, maxSlice)
     }
 
     private fun stopBuffering(discardSegments: Boolean) {
@@ -446,6 +706,7 @@ class NativeCapturePipeline(
                 startEpochMs = startedAt,
                 endEpochMs = System.currentTimeMillis(),
             ).also { completed ->
+                lastAchievedFps = probeVideoTrackNominalFrameRate(path)
                 completedSegments.addLast(completed)
                 pruneSegments(nowEpochMs = completed.endEpochMs)
             }
@@ -495,6 +756,53 @@ class NativeCapturePipeline(
             .addOnCompleteListener(mainExecutor) {
                 isProcessingPose = false
                 imageProxy.close()
+            }
+    }
+
+    private fun displayRotationDegrees(): Int {
+        val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            activity.display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            activity.windowManager.defaultDisplay.rotation
+        }
+        return when (rotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
+    private fun onRtmpPoseImage(image: Image) {
+        if (!detectionEnabled || isProcessingPose) {
+            image.close()
+            return
+        }
+        isProcessingPose = true
+        val rotationDegrees = displayRotationDegrees()
+        val inputImage = InputImage.fromMediaImage(image, rotationDegrees)
+        val w = image.width
+        val h = image.height
+        poseDetector.process(inputImage)
+            .addOnSuccessListener(mainExecutor) { pose ->
+                sendPoseEvent(
+                    pose = pose,
+                    imageWidth = w,
+                    imageHeight = h,
+                    rotationDegrees = rotationDegrees,
+                )
+            }
+            .addOnFailureListener(mainExecutor) { error ->
+                sendError(
+                    code = "pose_detection_failed",
+                    message = error.message ?: "Pose detection failed.",
+                )
+            }
+            .addOnCompleteListener(mainExecutor) {
+                isProcessingPose = false
+                image.close()
             }
     }
 
@@ -580,7 +888,7 @@ class NativeCapturePipeline(
 
         val clipStartEpochMs = triggerEpochMs - preRollMs
         val clipEndEpochMs = triggerEpochMs + postRollMs
-               sealCurrentSegment(
+        sealCurrentSegment(
             restartAfterFinalize = true,
             callback = {
                 val selectedSegments = completedSegments.filter { segment ->
@@ -842,8 +1150,16 @@ class NativeCapturePipeline(
         }
     }
 
+    private fun pruneRetentionExtraMs(): Long {
+        if (!isHighFpsRollingBuffer()) {
+            return 4000L
+        }
+        val nominal = nominalTargetFpsForPreference()
+        return (4000L + (nominal / 30) * 2000L).coerceAtMost(22_000L)
+    }
+
     private fun pruneSegments(nowEpochMs: Long) {
-        val cutoff = nowEpochMs - (preRollMs + postRollMs + 4000L)
+        val cutoff = nowEpochMs - (preRollMs + postRollMs + pruneRetentionExtraMs())
         while (completedSegments.isNotEmpty() && completedSegments.first().endEpochMs < cutoff) {
             val expired = completedSegments.removeFirst()
             File(expired.path).delete()
@@ -884,8 +1200,31 @@ class NativeCapturePipeline(
                 "buffering" to bufferingEnabled,
                 "completedSegmentCount" to completedSegments.size,
                 "segmentSliceMs" to segmentDurationMs,
+                "videoFpsMode" to videoFpsMode,
+                "targetFps" to nominalTargetFpsForPreference().toDouble(),
+                "achievedFps" to lastAchievedFps,
+                "highSpeed" to isHighFpsRollingBuffer(),
             ),
         )
+    }
+
+    private fun probeVideoTrackNominalFrameRate(path: String): Double? {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(path)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("video/") && format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                    return format.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble()
+                }
+            }
+        } catch (_: Exception) {
+            return null
+        } finally {
+            extractor.release()
+        }
+        return null
     }
 
     private fun sendError(code: String, message: String) {
@@ -919,15 +1258,15 @@ private class NativePreviewPlatformView(
     context: Context,
     private val pipeline: NativeCapturePipeline,
 ) : PlatformView {
-    private val previewView = PreviewView(context)
+    private val textureView = TextureView(context)
 
     init {
-        pipeline.attachPreviewView(previewView)
+        pipeline.attachPreviewView(textureView)
     }
 
-    override fun getView(): View = previewView
+    override fun getView(): View = textureView
 
     override fun dispose() {
-        pipeline.detachPreviewView(previewView)
+        pipeline.detachPreviewView(textureView)
     }
 }

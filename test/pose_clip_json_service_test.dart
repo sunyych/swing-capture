@@ -84,4 +84,31 @@ void main() {
     expect((outFrames.first as Map<String, dynamic>)['hasPose'], isTrue);
     expect((outFrames.last as Map<String, dynamic>)['hasPose'], isFalse);
   });
+
+  test('caps reported durationMs at 60000 for oversized windows', () {
+    const service = PoseClipJsonService();
+    final startAt = DateTime.utc(2026, 4, 20, 12, 0, 0);
+    final endAt = startAt.add(const Duration(seconds: 90));
+    final event = ActionEvent(
+      label: 'baseball_swing',
+      triggeredAt: startAt,
+      score: 1,
+      preRollMs: 0,
+      postRollMs: 0,
+      reason: 'test',
+    );
+
+    final payload = service.buildPayload(
+      clipId: 'clip-long',
+      videoPath: '/tmp/long.mp4',
+      capturePipeline: 'flutter_camera_buffer',
+      cameraFacing: 'back',
+      clipStartAt: startAt,
+      clipEndAt: endAt,
+      event: event,
+      frames: const [],
+    );
+
+    expect((payload['event'] as Map<String, dynamic>)['durationMs'], 60000);
+  });
 }

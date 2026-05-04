@@ -12,4 +12,10 @@ class AppConstants {
   static const double defaultPostRollSeconds = 2.0;
   static const int defaultCooldownMs = 1800;
   static const Duration hitterStableDuration = Duration(milliseconds: 1000);
+
+  /// RTMP live video bitrate when idle (between swing markers).
+  static const int rtmpIdleVideoBitrateBps = 2_500_000;
+
+  /// RTMP live video bitrate boost during a detected swing window.
+  static const int rtmpSwingVideoBitrateBps = 4_500_000;
 }
