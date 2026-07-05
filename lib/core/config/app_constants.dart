@@ -7,7 +7,7 @@ class AppConstants {
   static const bool verbosePoseJsonLog = true;
 
   static const String historyBoxName = 'capture_history';
-  static const String swingCaptureAlbum = 'SwingCapture';
+  static const String motionCaptureAlbum = 'MotionCapture';
   static const double defaultPreRollSeconds = 2.0;
   static const double defaultPostRollSeconds = 2.0;
   static const int defaultCooldownMs = 1800;

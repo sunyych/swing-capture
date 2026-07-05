@@ -137,7 +137,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
         title: const Text('Export to Photos'),
         content: Text(
           'Save $count clip${count == 1 ? '' : 's'} to the '
-          '${AppConstants.swingCaptureAlbum} album?',
+          '${AppConstants.motionCaptureAlbum} album?',
         ),
         actions: [
           TextButton(

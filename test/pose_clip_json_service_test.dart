@@ -65,6 +65,12 @@ void main() {
         firstFrame,
         PoseFrame(timestamp: endAt, landmarks: const {}),
       ],
+      sessionId: 'session-1',
+      clipIndex: 2,
+      reviewState: 'unreviewed',
+      userTag: 'forehand',
+      modelLabel: 'swing',
+      modelConfidence: 0.87,
     );
 
     expect(payload['schema'], PoseClipJsonService.schemaId);
@@ -78,6 +84,11 @@ void main() {
       (payload['event'] as Map<String, dynamic>)['label'],
       'baseball_swing',
     );
+    final dataset = payload['dataset'] as Map<String, dynamic>;
+    expect(dataset['sessionId'], 'session-1');
+    expect(dataset['clipIndex'], 2);
+    expect(dataset['userTag'], 'forehand');
+    expect(dataset['modelLabel'], 'swing');
 
     final outFrames = payload['frames'] as List<dynamic>;
     expect(outFrames, hasLength(2));

@@ -1,4 +1,4 @@
-package com.example.swingcapture
+package com.lumiaiq.MotionCapture
 
 import com.pedro.common.ConnectChecker
 

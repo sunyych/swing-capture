@@ -13,6 +13,7 @@ sealed class NativeCaptureEvent {
       'camera_state' => NativeCameraStateEvent.fromMap(map),
       'buffer_state' => NativeBufferStateEvent.fromMap(map),
       'rtmp_state' => NativeRtmpStateEvent.fromMap(map),
+      'video_import_progress' => NativeVideoImportProgressEvent.fromMap(map),
       'error' => NativeCaptureErrorEvent.fromMap(map),
       _ => NativeCaptureUnknownEvent(type),
     };
@@ -68,6 +69,114 @@ class NativePoseEvent extends NativeCaptureEvent {
   final List<NativePosePoint> points;
 }
 
+class NativeVideoPickResult {
+  const NativeVideoPickResult({
+    required this.videoPath,
+    required this.durationMs,
+    this.displayName,
+  });
+
+  factory NativeVideoPickResult.fromMap(Map<dynamic, dynamic> map) {
+    return NativeVideoPickResult(
+      videoPath: map['videoPath'] as String? ?? '',
+      durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
+      displayName: map['displayName'] as String?,
+    );
+  }
+
+  final String videoPath;
+  final int durationMs;
+  final String? displayName;
+}
+
+class NativeVideoPoseFrame {
+  const NativeVideoPoseFrame({required this.offsetMs, required this.points});
+
+  factory NativeVideoPoseFrame.fromMap(Map<dynamic, dynamic> map) {
+    final rawLandmarks = map['landmarks'];
+    final landmarks = <NativePosePoint>[];
+    if (rawLandmarks is List) {
+      for (final item in rawLandmarks) {
+        if (item is Map) {
+          landmarks.add(NativePosePoint.fromMap(item.cast<Object?, Object?>()));
+        }
+      }
+    }
+    return NativeVideoPoseFrame(
+      offsetMs: (map['offsetMs'] as num?)?.toInt() ?? 0,
+      points: landmarks,
+    );
+  }
+
+  final int offsetMs;
+  final List<NativePosePoint> points;
+}
+
+class NativeVideoPoseExtractionResult {
+  const NativeVideoPoseExtractionResult({
+    required this.durationMs,
+    required this.frameCount,
+    required this.poseFrameCount,
+    required this.frames,
+  });
+
+  factory NativeVideoPoseExtractionResult.fromMap(Map<dynamic, dynamic> map) {
+    final rawFrames = map['frames'];
+    final frames = <NativeVideoPoseFrame>[];
+    if (rawFrames is List) {
+      for (final item in rawFrames) {
+        if (item is Map) {
+          frames.add(NativeVideoPoseFrame.fromMap(item));
+        }
+      }
+    }
+    return NativeVideoPoseExtractionResult(
+      durationMs: (map['durationMs'] as num?)?.toInt() ?? 0,
+      frameCount: (map['frameCount'] as num?)?.toInt() ?? frames.length,
+      poseFrameCount:
+          (map['poseFrameCount'] as num?)?.toInt() ??
+          frames.where((frame) => frame.points.isNotEmpty).length,
+      frames: frames,
+    );
+  }
+
+  final int durationMs;
+  final int frameCount;
+  final int poseFrameCount;
+  final List<NativeVideoPoseFrame> frames;
+}
+
+class NativeVideoImportProgressEvent extends NativeCaptureEvent {
+  const NativeVideoImportProgressEvent({
+    required this.jobId,
+    required this.phase,
+    required this.progress,
+    required this.processedFrames,
+    this.totalFrames,
+    this.message,
+  });
+
+  factory NativeVideoImportProgressEvent.fromMap(Map<Object?, Object?> map) {
+    return NativeVideoImportProgressEvent(
+      jobId: map['jobId'] as String? ?? '',
+      phase: map['phase'] as String? ?? 'processing',
+      progress: ((map['progress'] as num?)?.toDouble() ?? 0)
+          .clamp(0, 1)
+          .toDouble(),
+      processedFrames: (map['processedFrames'] as num?)?.toInt() ?? 0,
+      totalFrames: (map['totalFrames'] as num?)?.toInt(),
+      message: map['message'] as String?,
+    );
+  }
+
+  final String jobId;
+  final String phase;
+  final double progress;
+  final int processedFrames;
+  final int? totalFrames;
+  final String? message;
+}
+
 class NativeCameraStateEvent extends NativeCaptureEvent {
   const NativeCameraStateEvent({
     required this.lensDirection,
@@ -104,7 +213,8 @@ class NativeBufferStateEvent extends NativeCaptureEvent {
   factory NativeBufferStateEvent.fromMap(Map<Object?, Object?> map) {
     final explicitTarget = (map['targetFps'] as num?)?.toDouble();
     final legacyNominal = map['nominalTargetFps'] as num?;
-    final target = explicitTarget ??
+    final target =
+        explicitTarget ??
         (legacyNominal != null && legacyNominal.toInt() >= 0
             ? legacyNominal.toDouble()
             : null);
@@ -183,8 +293,7 @@ class CapturePlatformChannel {
     'swingcapture/capture_events',
   );
 
-  static bool get _useNativeEvents =>
-      Platform.isAndroid || Platform.isIOS;
+  static bool get _useNativeEvents => Platform.isAndroid || Platform.isIOS;
 
   Stream<NativeCaptureEvent> captureEvents() {
     if (!_useNativeEvents) {
@@ -317,7 +426,9 @@ class CapturePlatformChannel {
     }
     try {
       await _methodChannel.invokeMethod<void>('stopRtmpStream');
-    } on MissingPluginException {}
+    } on MissingPluginException {
+      // Stub build.
+    }
   }
 
   Future<void> setRtmpSwingBitrate({required bool swingActive}) async {
@@ -328,7 +439,9 @@ class CapturePlatformChannel {
       await _methodChannel.invokeMethod<void>('setRtmpSwingBitrate', {
         'swingActive': swingActive,
       });
-    } on MissingPluginException {}
+    } on MissingPluginException {
+      // Stub build.
+    }
   }
 
   Future<void> sendSwingMarker({
@@ -355,7 +468,9 @@ class CapturePlatformChannel {
         if (score != null) 'score': score,
         if (endedAtEpochMs != null) 'endedAtEpochMs': endedAtEpochMs,
       });
-    } on MissingPluginException {}
+    } on MissingPluginException {
+      // Stub build.
+    }
   }
 
   Future<void> publishSwingClip({
@@ -374,7 +489,9 @@ class CapturePlatformChannel {
         'swingId': swingId,
         'weight': weight,
       });
-    } on MissingPluginException {}
+    } on MissingPluginException {
+      // Stub build.
+    }
   }
 
   Future<String?> saveClip({
@@ -410,5 +527,44 @@ class CapturePlatformChannel {
     await _methodChannel.invokeMethod<void>('saveToGallery', {
       'filePath': filePath,
     });
+  }
+
+  Future<NativeVideoPickResult?> pickVideoFromLibrary({
+    required String destinationDirectory,
+    required String filePrefix,
+  }) async {
+    if (!_useNativeEvents) {
+      return null;
+    }
+    final result = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'pickVideoFromLibrary',
+      {'destinationDirectory': destinationDirectory, 'filePrefix': filePrefix},
+    );
+    if (result == null) {
+      return null;
+    }
+    return NativeVideoPickResult.fromMap(result);
+  }
+
+  Future<NativeVideoPoseExtractionResult> extractPoseFramesFromVideo({
+    required String videoPath,
+    double targetFps = 12,
+    int maxFrames = 1800,
+    String? jobId,
+  }) async {
+    if (!_useNativeEvents) {
+      throw UnsupportedError('Video pose extraction requires Android or iOS.');
+    }
+    final result = await _methodChannel
+        .invokeMethod<Map<dynamic, dynamic>>('extractPoseFramesFromVideo', {
+          'videoPath': videoPath,
+          'targetFps': targetFps,
+          'maxFrames': maxFrames,
+          if (jobId != null) 'jobId': jobId,
+        });
+    if (result == null) {
+      throw StateError('Native video pose extraction returned no result.');
+    }
+    return NativeVideoPoseExtractionResult.fromMap(result);
   }
 }

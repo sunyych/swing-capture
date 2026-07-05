@@ -69,6 +69,9 @@ class CaptureSettings {
     required this.autoRecordOnReady,
     required this.autoSaveToGallery,
     required this.videoFpsMode,
+    this.autoRecordThreshold = 0.7,
+    this.activeModelVersion = 'hybrid_v1',
+    this.enableHybridLearning = true,
     this.rtmpUrl = '',
     this.rtmpEnabled = false,
   });
@@ -81,6 +84,9 @@ class CaptureSettings {
   final bool autoRecordOnReady;
   final bool autoSaveToGallery;
   final VideoFpsMode videoFpsMode;
+  final double autoRecordThreshold;
+  final String activeModelVersion;
+  final bool enableHybridLearning;
 
   /// RTMP/RTMPS publish URL (may embed user:pass@ and stream key in path). Empty when unused.
   final String rtmpUrl;
@@ -98,6 +104,9 @@ class CaptureSettings {
       autoRecordOnReady: true,
       autoSaveToGallery: true,
       videoFpsMode: VideoFpsMode.standard,
+      autoRecordThreshold: 0.7,
+      activeModelVersion: 'hybrid_v1',
+      enableHybridLearning: true,
       rtmpUrl: '',
       rtmpEnabled: false,
     );
@@ -112,6 +121,9 @@ class CaptureSettings {
     bool? autoRecordOnReady,
     bool? autoSaveToGallery,
     VideoFpsMode? videoFpsMode,
+    double? autoRecordThreshold,
+    String? activeModelVersion,
+    bool? enableHybridLearning,
     String? rtmpUrl,
     bool? rtmpEnabled,
   }) {
@@ -124,6 +136,9 @@ class CaptureSettings {
       autoRecordOnReady: autoRecordOnReady ?? this.autoRecordOnReady,
       autoSaveToGallery: autoSaveToGallery ?? this.autoSaveToGallery,
       videoFpsMode: videoFpsMode ?? this.videoFpsMode,
+      autoRecordThreshold: autoRecordThreshold ?? this.autoRecordThreshold,
+      activeModelVersion: activeModelVersion ?? this.activeModelVersion,
+      enableHybridLearning: enableHybridLearning ?? this.enableHybridLearning,
       rtmpUrl: rtmpUrl ?? this.rtmpUrl,
       rtmpEnabled: rtmpEnabled ?? this.rtmpEnabled,
     );
@@ -139,6 +154,9 @@ class CaptureSettings {
       'autoRecordOnReady': autoRecordOnReady,
       'autoSaveToGallery': autoSaveToGallery,
       'videoFpsMode': videoFpsMode.wireValue,
+      'autoRecordThreshold': autoRecordThreshold,
+      'activeModelVersion': activeModelVersion,
+      'enableHybridLearning': enableHybridLearning,
       'rtmpUrl': rtmpUrl,
       'rtmpEnabled': rtmpEnabled,
     };
@@ -161,6 +179,10 @@ class CaptureSettings {
       autoRecordOnReady: map['autoRecordOnReady'] as bool? ?? true,
       autoSaveToGallery: map['autoSaveToGallery'] as bool? ?? true,
       videoFpsMode: videoFpsModeFromWire(map['videoFpsMode'] as String?),
+      autoRecordThreshold:
+          (map['autoRecordThreshold'] as num?)?.toDouble() ?? 0.7,
+      activeModelVersion: map['activeModelVersion'] as String? ?? 'hybrid_v1',
+      enableHybridLearning: map['enableHybridLearning'] as bool? ?? true,
       rtmpUrl: map['rtmpUrl'] as String? ?? '',
       rtmpEnabled: map['rtmpEnabled'] as bool? ?? false,
     );

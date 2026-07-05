@@ -37,6 +37,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   SwingTfliteInferenceResult? _inferenceResult;
   bool _isInferring = false;
   String? _inferenceMessage;
+  final List<CaptureRecord> _tagUndoStack = <CaptureRecord>[];
 
   CaptureRecord get _currentRecord => _records[_currentIndex];
   bool get _hasPrevious => _currentIndex > 0;
@@ -126,10 +127,113 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
       return;
     }
     if (velocity < 0) {
-      await _showRecordAt(_currentIndex + 1);
+      await _applyQuickTag(
+        reviewState: CaptureReviewState.rejected,
+        userTag: 'not_action',
+      );
       return;
     }
-    await _showRecordAt(_currentIndex - 1);
+    await _applyQuickTag(
+      reviewState: CaptureReviewState.accepted,
+      userTag: 'action',
+    );
+  }
+
+  Future<void> _handleVerticalSwipe(DragEndDetails details) async {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity.abs() < 250) {
+      return;
+    }
+    if (velocity < 0) {
+      await _promptCustomTag();
+      return;
+    }
+    await _undoLastTag();
+  }
+
+  Future<void> _applyQuickTag({
+    required CaptureReviewState reviewState,
+    required String userTag,
+  }) async {
+    final current = _currentRecord;
+    _tagUndoStack.add(current);
+    await ref.read(historyControllerProvider.notifier).updateRecordTagging(
+      record: current,
+      reviewState: reviewState,
+      userTag: userTag,
+      datasetState: CaptureDatasetState.labeled,
+      trainingState: TrainingLifecycleState.queued,
+    );
+    final refreshed = ref.read(historyControllerProvider).valueOrNull;
+    if (refreshed != null) {
+      _records
+        ..clear()
+        ..addAll(refreshed.map((item) => item.record));
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _promptCustomTag() async {
+    final controller = TextEditingController(text: _currentRecord.userTag ?? '');
+    final tag = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add tag'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Tag name',
+            hintText: 'e.g. forehand, backhand, warmup',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (tag == null || tag.isEmpty) {
+      return;
+    }
+    await _applyQuickTag(
+      reviewState: CaptureReviewState.needsReview,
+      userTag: tag,
+    );
+  }
+
+  Future<void> _undoLastTag() async {
+    if (_tagUndoStack.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No tagging action to undo.')),
+      );
+      return;
+    }
+    final previous = _tagUndoStack.removeLast();
+    await ref
+        .read(historyControllerProvider.notifier)
+        .updateRecordTagging(record: previous);
+    final refreshed = ref.read(historyControllerProvider).valueOrNull;
+    if (refreshed != null) {
+      _records
+        ..clear()
+        ..addAll(refreshed.map((item) => item.record));
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _deleteCapture() async {
@@ -160,7 +264,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
       builder: (context) => AlertDialog(
         title: const Text('Export to Photos'),
         content: Text(
-          'Save this clip to the ${AppConstants.swingCaptureAlbum} album?',
+          'Save this clip to the ${AppConstants.motionCaptureAlbum} album?',
         ),
         actions: [
           TextButton(
@@ -230,6 +334,18 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
         _inferenceResult = result;
         _inferenceMessage = 'On-device inference completed.';
       });
+      await ref.read(historyControllerProvider.notifier).updateRecordTagging(
+        record: _currentRecord,
+        modelLabel: result.label,
+        modelConfidence: result.confidence,
+        trainingState: TrainingLifecycleState.queued,
+      );
+      final refreshed = ref.read(historyControllerProvider).valueOrNull;
+      if (refreshed != null) {
+        _records
+          ..clear()
+          ..addAll(refreshed.map((item) => item.record));
+      }
     } catch (error) {
       if (!mounted) {
         return;
@@ -273,6 +389,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,
         onHorizontalDragEnd: _handleHorizontalSwipe,
+        onVerticalDragEnd: _handleVerticalSwipe,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
@@ -339,7 +456,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
             const SizedBox(height: 12),
             if (_records.length > 1)
               Text(
-                'Swipe left or right to browse adjacent clips.',
+                'Quick tagging: swipe right=action, left=not action, up=custom tag, down=undo.',
                 style: Theme.of(
                   context,
                 ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
@@ -366,6 +483,9 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                       'Location: ${currentRecord.locationLabel ?? 'Unavailable'}',
                     ),
                     Text('Video: ${currentRecord.videoPath}'),
+                    Text('Review: ${currentRecord.reviewState.name}'),
+                    Text('Dataset: ${currentRecord.datasetState.name}'),
+                    Text('Tag: ${currentRecord.userTag ?? 'none'}'),
                     if (currentRecord.poseJsonPath != null &&
                         currentRecord.poseJsonPath!.isNotEmpty)
                       Text('Pose JSON: ${currentRecord.poseJsonPath}'),

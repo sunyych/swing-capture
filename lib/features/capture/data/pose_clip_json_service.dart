@@ -24,6 +24,12 @@ class PoseClipJsonService {
     required DateTime clipEndAt,
     required ActionEvent event,
     required List<PoseFrame> frames,
+    String? sessionId,
+    int? clipIndex,
+    String? reviewState,
+    String? userTag,
+    String? modelLabel,
+    double? modelConfidence,
   }) async {
     final file = File(outputPath);
     final parent = file.parent;
@@ -40,6 +46,12 @@ class PoseClipJsonService {
       clipEndAt: clipEndAt,
       event: event,
       frames: frames,
+      sessionId: sessionId,
+      clipIndex: clipIndex,
+      reviewState: reviewState,
+      userTag: userTag,
+      modelLabel: modelLabel,
+      modelConfidence: modelConfidence,
     );
 
     const encoder = JsonEncoder.withIndent('  ');
@@ -56,6 +68,12 @@ class PoseClipJsonService {
     required DateTime clipEndAt,
     required ActionEvent event,
     required List<PoseFrame> frames,
+    String? sessionId,
+    int? clipIndex,
+    String? reviewState,
+    String? userTag,
+    String? modelLabel,
+    double? modelConfidence,
   }) {
     final sortedFrames = List<PoseFrame>.from(frames)
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -82,6 +100,15 @@ class PoseClipJsonService {
           for (final bone in kPoseBones)
             {'from': bone.a.name, 'to': bone.b.name},
         ],
+      },
+      'dataset': {
+        'sessionId': sessionId,
+        'clipIndex': clipIndex,
+        'reviewState': reviewState ?? 'unreviewed',
+        'userTag': userTag,
+        'modelLabel': modelLabel,
+        'modelConfidence': modelConfidence != null ? _r4(modelConfidence) : null,
+        'lifecycle': {'extracted': true, 'labeled': false, 'verified': false, 'uploaded': false},
       },
       'event': {
         'label': event.label,

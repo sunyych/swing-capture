@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>SwingCapture</string>
+	<string>MotionCapture</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>swingcapture</string>
+	<string>MotionCapture</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -46,14 +46,14 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>SwingCapture needs camera access to preview the hitter and record swings.</string>
+	<string>MotionCapture needs camera access to preview the hitter and record swings.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SwingCapture can optionally record audio during swing capture clips.</string>
+	<string>MotionCapture can optionally record audio during swing capture clips.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>SwingCapture saves captured swing clips into your photo library.</string>
+	<string>MotionCapture saves captured swing clips into your photo library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>SwingCapture accesses your photo library to save clips into the SwingCapture album.</string>
+	<string>MotionCapture accesses your photo library to import videos and save clips into the MotionCapture album.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>SwingCapture can attach field location metadata to captured clips.</string>
+	<string>MotionCapture can attach field location metadata to captured clips.</string>
 </dict>
 </plist>

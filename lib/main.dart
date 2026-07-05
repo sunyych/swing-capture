@@ -11,7 +11,7 @@ Future<void> main() async {
   runApp(
     ProviderScope(
       overrides: bootstrap.overrides,
-      child: const SwingCaptureApp(),
+      child: const MotionCaptureApp(),
     ),
   );
 }

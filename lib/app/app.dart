@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 
 import 'app_shell.dart';
 
-class SwingCaptureApp extends StatelessWidget {
-  const SwingCaptureApp({super.key});
+class MotionCaptureApp extends StatelessWidget {
+  const MotionCaptureApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SwingCapture',
+      title: 'MotionCapture',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(

@@ -1,4 +1,4 @@
-package com.example.swingcapture
+package com.lumiaiq.MotionCapture
 
 import android.media.Image
 import android.util.Log

@@ -36,14 +36,16 @@ void main() {
             _FakeSettingsRepository(),
           ),
         ],
-        child: const SwingCaptureApp(),
+        child: const MotionCaptureApp(),
       ),
     );
 
     await tester.pumpAndSettle();
 
     expect(find.text('Capture'), findsWidgets);
-    expect(find.text('History'), findsWidgets);
+    expect(find.text('Dataset'), findsWidgets);
+    expect(find.text('Studio'), findsWidgets);
+    expect(find.text('Training'), findsWidgets);
     expect(find.text('Settings'), findsWidgets);
   });
 }

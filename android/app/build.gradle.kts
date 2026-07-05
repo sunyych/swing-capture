@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.swingcapture"
+    namespace = "com.lumiaiq.MotionCapture"
     compileSdk = 36
     // Match plugins (camera_android_camerax, gal, path_provider_android, etc.)
     ndkVersion = "27.0.12077973"
@@ -22,7 +22,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.swingcapture"
+        applicationId = "com.lumiaiq.MotionCapture"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24

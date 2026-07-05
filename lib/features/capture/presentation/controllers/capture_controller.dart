@@ -423,6 +423,12 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     double? latitude,
     double? longitude,
     String? locationLabel,
+    String? sessionId,
+    int? clipIndex,
+    CaptureSessionStatus? sessionStatus,
+    String? modelLabel,
+    double? modelConfidence,
+    TrainingLifecycleState trainingState = TrainingLifecycleState.none,
     bool savedToGallery = false,
   }) async {
     final repository = ref.read(historyRepositoryProvider);
@@ -448,11 +454,17 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
       thumbnailPath: thumbnailPath,
       createdAt: DateTime.now(),
       durationMs: durationMs,
-      albumName: AppConstants.swingCaptureAlbum,
+      albumName: AppConstants.motionCaptureAlbum,
       poseJsonPath: poseJsonPath,
       latitude: latitude,
       longitude: longitude,
       locationLabel: locationLabel,
+      sessionId: sessionId,
+      clipIndex: clipIndex,
+      sessionStatus: sessionStatus,
+      modelLabel: modelLabel,
+      modelConfidence: modelConfidence,
+      trainingState: trainingState,
     );
 
     await repository.saveRecord(record);
@@ -512,6 +524,16 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     PoseFrame? frame,
     double? completeness,
   }) {
+    final settings = ref.read(settingsControllerProvider).valueOrNull;
+    final threshold = settings?.autoRecordThreshold ?? 0.7;
+    if (event.score < threshold) {
+      state = state.copyWith(
+        lastMessage:
+            'Ignored low-confidence trigger (${event.score.toStringAsFixed(2)} < ${threshold.toStringAsFixed(2)}).',
+      );
+      return;
+    }
+
     if (AppConstants.verbosePoseJsonLog) {
       debugPrint(
         '[SwingDetect] '

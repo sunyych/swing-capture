@@ -59,6 +59,28 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
     state = AsyncValue.data(updated);
   }
 
+  Future<void> updateRecordTagging({
+    required CaptureRecord record,
+    CaptureReviewState? reviewState,
+    String? userTag,
+    CaptureDatasetState? datasetState,
+    String? modelLabel,
+    double? modelConfidence,
+    TrainingLifecycleState? trainingState,
+  }) async {
+    final repository = ref.read(historyRepositoryProvider);
+    final updated = record.copyWith(
+      reviewState: reviewState,
+      userTag: userTag,
+      datasetState: datasetState,
+      modelLabel: modelLabel,
+      modelConfidence: modelConfidence,
+      trainingState: trainingState,
+    );
+    await repository.saveRecord(updated);
+    await refresh();
+  }
+
   /// Deletes persisted rows and local video/thumbnail files, then refreshes list state.
   Future<void> deleteRecords(List<CaptureRecord> records) async {
     if (records.isEmpty) {
@@ -72,7 +94,7 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
     await refresh();
   }
 
-  /// Copies clip files into the device photo library ([AppConstants.swingCaptureAlbum]).
+  /// Copies clip files into the device photo library ([AppConstants.motionCaptureAlbum]).
   /// Returns `(saved, skipped)` where `skipped` counts missing files or failed puts.
   Future<(int saved, int skipped)> exportRecordsToGallery(
     List<CaptureRecord> records,
@@ -104,7 +126,7 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
       try {
         await Gal.putVideo(
           record.videoPath,
-          album: AppConstants.swingCaptureAlbum,
+          album: AppConstants.motionCaptureAlbum,
         );
         saved++;
       } catch (_) {

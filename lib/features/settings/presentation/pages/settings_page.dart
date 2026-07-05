@@ -49,6 +49,61 @@ class _SettingsView extends StatelessWidget {
           const SizedBox(height: 16),
           _CaptureModelCard(settings: settings, onChanged: onChanged),
           const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Hybrid learning and auto-record model',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Use on-device inference for low-latency trigger and keep training lifecycle synced with backend model versions.',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 12),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: settings.enableHybridLearning,
+                    title: const Text('Enable hybrid learning'),
+                    subtitle: const Text(
+                      'On-device inference + backend training lifecycle.',
+                    ),
+                    onChanged: (value) => onChanged(
+                      settings.copyWith(enableHybridLearning: value),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    initialValue: settings.activeModelVersion,
+                    decoration: const InputDecoration(
+                      labelText: 'Active model version',
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) => onChanged(
+                      settings.copyWith(activeModelVersion: value.trim()),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          _SliderCard(
+            label: 'Auto-record trigger threshold',
+            valueLabel: settings.autoRecordThreshold.toStringAsFixed(2),
+            value: settings.autoRecordThreshold,
+            min: 0.10,
+            max: 0.99,
+            divisions: 89,
+            onChanged: (value) =>
+                onChanged(settings.copyWith(autoRecordThreshold: value)),
+          ),
+          const SizedBox(height: 16),
           _SliderCard(
             label: 'Pre-roll seconds',
             valueLabel: settings.preRollSeconds.toStringAsFixed(1),
@@ -146,7 +201,7 @@ class _SettingsView extends StatelessWidget {
             value: settings.autoRecordOnReady,
             title: const Text('Auto detection'),
             subtitle: const Text(
-              'When on, SwingCapture uses the selected model to capture automatically. When off, capture stays manual and only saves when you trigger it on the Capture screen.',
+              'When on, MotionCapture uses the selected model to capture automatically. When off, capture stays manual and only saves when you trigger it on the Capture screen.',
             ),
             onChanged: (value) =>
                 onChanged(settings.copyWith(autoRecordOnReady: value)),
@@ -155,7 +210,7 @@ class _SettingsView extends StatelessWidget {
             value: settings.autoSaveToGallery,
             title: const Text('Auto-save to gallery'),
             subtitle: const Text(
-              'When the native export pipeline is ready, clips go to the SwingCapture album.',
+              'When the native export pipeline is ready, clips go to the MotionCapture album.',
             ),
             onChanged: (value) =>
                 onChanged(settings.copyWith(autoSaveToGallery: value)),

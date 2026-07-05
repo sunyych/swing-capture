@@ -57,6 +57,9 @@ void main() {
       expect(d.autoRecordOnReady, isTrue);
       expect(d.autoSaveToGallery, isTrue);
       expect(d.videoFpsMode, VideoFpsMode.standard);
+      expect(d.autoRecordThreshold, 0.7);
+      expect(d.activeModelVersion, 'hybrid_v1');
+      expect(d.enableHybridLearning, isTrue);
     });
 
     test('fromMap fills defaults for missing keys', () {
@@ -70,6 +73,9 @@ void main() {
       expect(parsed.autoRecordOnReady, defaults.autoRecordOnReady);
       expect(parsed.autoSaveToGallery, defaults.autoSaveToGallery);
       expect(parsed.videoFpsMode, VideoFpsMode.standard);
+      expect(parsed.autoRecordThreshold, defaults.autoRecordThreshold);
+      expect(parsed.activeModelVersion, defaults.activeModelVersion);
+      expect(parsed.enableHybridLearning, defaults.enableHybridLearning);
     });
 
     test('fromMap/toMap round-trip preserves fields including videoFpsMode', () {
@@ -82,6 +88,9 @@ void main() {
         autoRecordOnReady: false,
         autoSaveToGallery: false,
         videoFpsMode: VideoFpsMode.maxSupported,
+        autoRecordThreshold: 0.82,
+        activeModelVersion: 'hybrid_v2',
+        enableHybridLearning: false,
       );
       final roundTrip = CaptureSettings.fromMap(original.toMap());
       expect(roundTrip.preRollSeconds, original.preRollSeconds);
@@ -92,6 +101,9 @@ void main() {
       expect(roundTrip.autoRecordOnReady, original.autoRecordOnReady);
       expect(roundTrip.autoSaveToGallery, original.autoSaveToGallery);
       expect(roundTrip.videoFpsMode, original.videoFpsMode);
+      expect(roundTrip.autoRecordThreshold, original.autoRecordThreshold);
+      expect(roundTrip.activeModelVersion, original.activeModelVersion);
+      expect(roundTrip.enableHybridLearning, original.enableHybridLearning);
     });
 
     test('each VideoFpsMode round-trips through map storage', () {

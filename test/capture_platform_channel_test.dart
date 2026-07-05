@@ -46,20 +46,23 @@ void main() {
       expect(event.targetFps, 60.0);
     });
 
-    test('highFpsEnabled fallback supplies highSpeed when highSpeed absent', () {
-      final legacy = NativeBufferStateEvent.fromMap({
-        'buffering': true,
-        'highFpsEnabled': true,
-      });
-      expect(legacy.highSpeed, isTrue);
+    test(
+      'highFpsEnabled fallback supplies highSpeed when highSpeed absent',
+      () {
+        final legacy = NativeBufferStateEvent.fromMap({
+          'buffering': true,
+          'highFpsEnabled': true,
+        });
+        expect(legacy.highSpeed, isTrue);
 
-      final explicitFalse = NativeBufferStateEvent.fromMap({
-        'buffering': true,
-        'highSpeed': false,
-        'highFpsEnabled': true,
-      });
-      expect(explicitFalse.highSpeed, isFalse);
-    });
+        final explicitFalse = NativeBufferStateEvent.fromMap({
+          'buffering': true,
+          'highSpeed': false,
+          'highFpsEnabled': true,
+        });
+        expect(explicitFalse.highSpeed, isFalse);
+      },
+    );
   });
 
   group('NativeCaptureEvent.fromMap', () {
@@ -73,6 +76,27 @@ void main() {
       final buffer = event as NativeBufferStateEvent;
       expect(buffer.isBuffering, isTrue);
       expect(buffer.targetFps, 30.0);
+    });
+
+    test('dispatches video_import_progress to progress event', () {
+      final event = NativeCaptureEvent.fromMap({
+        'type': 'video_import_progress',
+        'jobId': 'import_1',
+        'phase': 'extracting',
+        'progress': 0.42,
+        'processedFrames': 42,
+        'totalFrames': 100,
+        'message': 'Extracting pose JSON... 42%',
+      });
+
+      expect(event, isA<NativeVideoImportProgressEvent>());
+      final progress = event as NativeVideoImportProgressEvent;
+      expect(progress.jobId, 'import_1');
+      expect(progress.phase, 'extracting');
+      expect(progress.progress, 0.42);
+      expect(progress.processedFrames, 42);
+      expect(progress.totalFrames, 100);
+      expect(progress.message, 'Extracting pose JSON... 42%');
     });
   });
 }

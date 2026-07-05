@@ -15,6 +15,7 @@ import '../../../../core/config/app_constants.dart';
 import '../../../../core/rolling_buffer_clip.dart';
 import '../../../../core/models/action_event.dart';
 import '../../../../core/models/capture_location_metadata.dart';
+import '../../../../core/models/capture_record.dart';
 import '../../../../core/models/capture_settings.dart';
 import '../../../../core/models/detection_state.dart';
 import '../../../../core/services/location_metadata_service.dart';
@@ -68,6 +69,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
   DateTime? _lastRecordingFrameAt;
   int _recordingFrameCount = 0;
   DateTime? _captureLockedUntil;
+  String? _activeSessionId;
+  int _sessionClipCount = 0;
 
   double? _minZoom;
   double? _maxZoom;
@@ -88,8 +91,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       ? _nativePreviewReady
       : (_cameraController != null && _cameraController!.value.isInitialized);
 
-  bool get _useNativeCapturePipeline =>
-      Platform.isAndroid || Platform.isIOS;
+  bool get _useNativeCapturePipeline => Platform.isAndroid || Platform.isIOS;
 
   /// Short RTMP status from native (e.g. live / reconnecting).
   String? _rtmpStatusLabel;
@@ -97,6 +99,29 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   bool _autoDetectionEnabled(CaptureSettings settings) {
     return settings.autoRecordOnReady;
+  }
+
+  bool get _sessionActive => _activeSessionId != null;
+
+  void _startDatasetSession() {
+    setState(() {
+      _activeSessionId = DateTime.now().microsecondsSinceEpoch.toString();
+      _sessionClipCount = 0;
+    });
+    ref
+        .read(captureControllerProvider.notifier)
+        .setLastMessage('Dataset session started. Capture multiple clips.');
+  }
+
+  void _finishDatasetSession() {
+    final count = _sessionClipCount;
+    setState(() {
+      _activeSessionId = null;
+      _sessionClipCount = 0;
+    });
+    ref
+        .read(captureControllerProvider.notifier)
+        .setLastMessage('Dataset session finished ($count clips).');
   }
 
   Future<void> _ensureNativeRollingBufferArmed() async {
@@ -349,6 +374,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
         ref
             .read(captureControllerProvider.notifier)
             .setLastMessage(event.message);
+      case NativeVideoImportProgressEvent():
+        break;
       case NativeCaptureUnknownEvent():
         break;
     }
@@ -571,7 +598,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .setLastMessage(_captureCooldownMessage());
       return;
     }
-    await ref.read(captureControllerProvider.notifier).startNativeRollingBuffer();
+    await ref
+        .read(captureControllerProvider.notifier)
+        .startNativeRollingBuffer();
     _recordingStartedAt ??= DateTime.now();
     ref.read(captureControllerProvider.notifier).setRecording(true);
     ref
@@ -658,12 +687,22 @@ class _CapturePageState extends ConsumerState<CapturePage>
             latitude: location?.latitude,
             longitude: location?.longitude,
             locationLabel: location?.label,
+            sessionId: _activeSessionId,
+            clipIndex: _sessionActive ? _sessionClipCount : null,
+            sessionStatus: _sessionActive
+                ? CaptureSessionStatus.committed
+                : null,
+            modelLabel: event.label,
+            modelConfidence: event.score,
             savedToGallery: false,
           );
+      if (_sessionActive) {
+        setState(() => _sessionClipCount++);
+      }
 
       final settings =
           ref.read(settingsControllerProvider).valueOrNull ??
-              CaptureSettings.defaults();
+          CaptureSettings.defaults();
       if (settings.rtmpEnabled && settings.rtmpUrl.trim().isNotEmpty) {
         final base = settings.rtmpUrl.trim();
         final clipUrl = '$base/swings/$clipId';
@@ -753,7 +792,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     final previous = _cameraController;
     final mediaSettings =
         ref.read(settingsControllerProvider).valueOrNull ??
-            CaptureSettings.defaults();
+        CaptureSettings.defaults();
     final fpsMode = mediaSettings.videoFpsMode;
     final controller = CameraController(
       _cameras[_selectedCameraIndex],
@@ -1577,8 +1616,16 @@ class _CapturePageState extends ConsumerState<CapturePage>
           latitude: location?.latitude,
           longitude: location?.longitude,
           locationLabel: location?.label,
+          sessionId: _activeSessionId,
+          clipIndex: _sessionActive ? _sessionClipCount : null,
+          sessionStatus: _sessionActive ? CaptureSessionStatus.committed : null,
+          modelLabel: event.label,
+          modelConfidence: event.score,
           savedToGallery: false,
         );
+    if (_sessionActive) {
+      setState(() => _sessionClipCount++);
+    }
 
     final savedToGallery = await _maybeSaveToGallery(trimmedPath);
     if (savedToGallery) {
@@ -1639,7 +1686,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         }
       }
 
-      await Gal.putVideo(videoPath, album: AppConstants.swingCaptureAlbum);
+      await Gal.putVideo(videoPath, album: AppConstants.motionCaptureAlbum);
       return true;
     } catch (_) {
       return false;
@@ -1828,14 +1875,17 @@ class _CapturePageState extends ConsumerState<CapturePage>
         videoPath: videoPath,
         capturePipeline: !_useNativeCapturePipeline
             ? 'flutter_camera_buffer'
-            : (Platform.isIOS
-                  ? 'native_ios_buffer'
-                  : 'native_android_buffer'),
+            : (Platform.isIOS ? 'native_ios_buffer' : 'native_android_buffer'),
         cameraFacing: _cameraFacingLabel(),
         clipStartAt: clipStartAt,
         clipEndAt: clipEndAt,
         event: event,
         frames: clipFrames,
+        sessionId: _activeSessionId,
+        clipIndex: _sessionActive ? _sessionClipCount : null,
+        reviewState: CaptureReviewState.unreviewed.name,
+        modelLabel: event.label,
+        modelConfidence: event.score,
       );
     } catch (_) {
       return null;
@@ -1898,8 +1948,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
             final currentLens = _lensLabelForUi();
             final resolutionSubtitle = _useNativeCapturePipeline
                 ? (Platform.isAndroid
-                    ? 'CameraX HD (native)'
-                    : 'AVFoundation (native)')
+                      ? 'CameraX HD (native)'
+                      : 'AVFoundation (native)')
                 : _resolutionLabel(_resolutionPreset);
 
             return SafeArea(
@@ -2156,9 +2206,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
                 bottom: 16,
                 child: _CaptureControlsOverlay(
                   isRecording: state.isRecording,
+                  sessionActive: _sessionActive,
                   hasCameraPermission: state.hasCameraPermission,
                   onToggleRecording: _toggleRecording,
                   onCaptureSwing: _triggerSwingEvent,
+                  onToggleSession: _sessionActive
+                      ? _finishDatasetSession
+                      : _startDatasetSession,
                 ),
               ),
             ],
@@ -2271,10 +2325,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     final stack = Stack(
       fit: StackFit.expand,
       children: [
-        const ColoredBox(
-          color: Colors.black,
-          child: NativeCameraPreview(),
-        ),
+        const ColoredBox(color: Colors.black, child: NativeCameraPreview()),
         if (overlay != null) overlay,
         if (showLoadingOverlay)
           const ColoredBox(
@@ -2502,15 +2553,19 @@ class _RecordingIndicator extends StatelessWidget {
 class _CaptureControlsOverlay extends StatelessWidget {
   const _CaptureControlsOverlay({
     required this.isRecording,
+    required this.sessionActive,
     required this.hasCameraPermission,
     required this.onToggleRecording,
     required this.onCaptureSwing,
+    required this.onToggleSession,
   });
 
   final bool isRecording;
+  final bool sessionActive;
   final bool hasCameraPermission;
   final Future<void> Function() onToggleRecording;
   final Future<void> Function() onCaptureSwing;
+  final VoidCallback onToggleSession;
 
   @override
   Widget build(BuildContext context) {
@@ -2554,6 +2609,24 @@ class _CaptureControlsOverlay extends StatelessWidget {
                 minimumSize: const Size.square(56),
               ),
               icon: const Icon(Icons.sports_baseball, size: 26),
+            ),
+            const SizedBox(height: 10),
+            IconButton.filledTonal(
+              onPressed: hasCameraPermission ? onToggleSession : null,
+              tooltip: sessionActive
+                  ? 'Finish dataset session'
+                  : 'Start dataset session',
+              style: IconButton.styleFrom(
+                foregroundColor: Colors.white,
+                backgroundColor: sessionActive
+                    ? const Color(0xFF7C3AED).withValues(alpha: 0.9)
+                    : const Color(0xFF334155).withValues(alpha: 0.9),
+                minimumSize: const Size.square(56),
+              ),
+              icon: Icon(
+                sessionActive ? Icons.checklist_rtl : Icons.playlist_add,
+                size: 24,
+              ),
             ),
           ],
         ),
@@ -2655,9 +2728,9 @@ class _StatusPanel extends StatelessWidget {
                 if (rtmpLabel != null && rtmpLabel!.isNotEmpty)
                   Text(
                     rtmpLabel!,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Colors.lightGreenAccent),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.lightGreenAccent,
+                    ),
                   ),
               ],
             ),
