@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:swingcapture/core/models/capture_settings.dart';
 import 'package:swingcapture/platform_channels/capture_platform_channel.dart';
 
 void main() {
@@ -97,6 +98,31 @@ void main() {
       expect(progress.processedFrames, 42);
       expect(progress.totalFrames, 100);
       expect(progress.message, 'Extracting pose JSON... 42%');
+    });
+  });
+
+  group('NativeRecordingCapability.fromMap', () {
+    test('maps native max fps to recommended fps mode', () {
+      final capability = NativeRecordingCapability.fromMap({
+        'maxFps': 120,
+        'supportedFps': [30, 60, 120],
+        'source': 'camera2',
+        'cameraLabel': 'back camera',
+      });
+
+      expect(capability.maxFps, 120);
+      expect(capability.supportedFps, [30, 60, 120]);
+      expect(capability.recommendedFpsMode, VideoFpsMode.high120);
+      expect(capability.summary, '120 fps back camera');
+    });
+
+    test('native recommended mode overrides max fps bucket', () {
+      final capability = NativeRecordingCapability.fromMap({
+        'maxFps': 240,
+        'recommendedVideoFpsMode': 'fps120',
+      });
+
+      expect(capability.recommendedFpsMode, VideoFpsMode.high120);
     });
   });
 }

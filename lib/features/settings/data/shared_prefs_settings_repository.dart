@@ -17,10 +17,14 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
   static const String _debugSkeletonKey = 'show_debug_skeleton';
   static const String _autoRecordKey = 'auto_record_on_ready';
   static const String _autoSaveKey = 'auto_save_to_gallery';
+
   /// Canonical storage for [CaptureSettings.videoFpsMode] (`fps120`, `fps240`, …).
   static const String _videoFpsModeKey = 'video_fps_mode';
+
   /// Legacy enum-name storage from earlier builds (`fps120`, `fps60`, …).
   static const String _legacyVideoFpsPreferenceKey = 'video_fps_preference';
+  static const String _autoSelectBestFpsKey = 'auto_select_best_fps';
+  static const String _dualCameraRoleKey = 'dual_camera_role';
   static const String _rtmpUrlKey = 'rtmp_url';
   static const String _rtmpEnabledKey = 'rtmp_enabled';
 
@@ -31,10 +35,10 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
     }
     final legacy = _prefs.getString(_legacyVideoFpsPreferenceKey);
     return switch (legacy) {
+      'fps60' => VideoFpsMode.high60,
       'fps120' => VideoFpsMode.high120,
       'fps240' => VideoFpsMode.high240,
       'maxSupported' => VideoFpsMode.maxSupported,
-      'fps60' => VideoFpsMode.standard,
       _ => VideoFpsMode.standard,
     };
   }
@@ -60,6 +64,11 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
       autoSaveToGallery:
           _prefs.getBool(_autoSaveKey) ?? defaults.autoSaveToGallery,
       videoFpsMode: _loadVideoFpsMode(),
+      autoSelectBestFps:
+          _prefs.getBool(_autoSelectBestFpsKey) ?? defaults.autoSelectBestFps,
+      dualCameraRole: dualCameraRoleFromWire(
+        _prefs.getString(_dualCameraRoleKey),
+      ),
       rtmpUrl: _prefs.getString(_rtmpUrlKey) ?? '',
       rtmpEnabled: _prefs.getBool(_rtmpEnabledKey) ?? false,
     );
@@ -75,6 +84,11 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
     await _prefs.setBool(_autoRecordKey, settings.autoRecordOnReady);
     await _prefs.setBool(_autoSaveKey, settings.autoSaveToGallery);
     await _prefs.setString(_videoFpsModeKey, settings.videoFpsMode.wireValue);
+    await _prefs.setBool(_autoSelectBestFpsKey, settings.autoSelectBestFps);
+    await _prefs.setString(
+      _dualCameraRoleKey,
+      settings.dualCameraRole.wireValue,
+    );
     await _prefs.setString(_rtmpUrlKey, settings.rtmpUrl);
     await _prefs.setBool(_rtmpEnabledKey, settings.rtmpEnabled);
     await _prefs.remove(_legacyVideoFpsPreferenceKey);

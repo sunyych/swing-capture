@@ -3,6 +3,8 @@ package com.lumiaiq.MotionCapture
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -139,6 +141,9 @@ class NativeCapturePipeline(
                 ensureCameraProvider()
                 bindUseCasesIfReady()
                 result.success(null)
+            }
+            "queryRecordingCapability" -> {
+                result.success(queryRecordingCapability())
             }
             "stopPreview" -> {
                 stopPreview()
@@ -483,6 +488,84 @@ class NativeCapturePipeline(
             "fps240" -> 240
             "maxSupported" -> 240
             else -> 30
+        }
+    }
+
+    private fun recommendedModeForMaxFps(maxFps: Int): String {
+        return when {
+            maxFps >= 240 -> "fps240"
+            maxFps >= 120 -> "fps120"
+            maxFps >= 60 -> "fps60"
+            else -> "standard"
+        }
+    }
+
+    private fun queryRecordingCapability(): Map<String, Any> {
+        return try {
+            val cameraManager =
+                activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            var selectedCameraId: String? = null
+            var selectedFacing = CameraCharacteristics.LENS_FACING_BACK
+            for (cameraId in cameraManager.cameraIdList) {
+                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                if (selectedCameraId == null || facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    selectedCameraId = cameraId
+                    selectedFacing = facing ?: CameraCharacteristics.LENS_FACING_BACK
+                    if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                        break
+                    }
+                }
+            }
+
+            val supportedFps = mutableSetOf(30)
+            if (selectedCameraId != null) {
+                val characteristics = cameraManager.getCameraCharacteristics(selectedCameraId)
+                characteristics
+                    .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    ?.forEach { range ->
+                        supportedFps.add(range.upper)
+                    }
+                characteristics
+                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    ?.highSpeedVideoFpsRanges
+                    ?.forEach { range ->
+                        supportedFps.add(range.upper)
+                    }
+            }
+
+            val normalized = supportedFps
+                .filter { it > 0 }
+                .map {
+                    when {
+                        it >= 240 -> 240
+                        it >= 120 -> 120
+                        it >= 60 -> 60
+                        else -> 30
+                    }
+                }
+                .toSet()
+                .sorted()
+            val maxFps = normalized.maxOrNull() ?: 30
+            mapOf(
+                "maxFps" to maxFps,
+                "supportedFps" to normalized,
+                "recommendedVideoFpsMode" to recommendedModeForMaxFps(maxFps),
+                "source" to "camera2",
+                "cameraLabel" to if (selectedFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                    "front camera"
+                } else {
+                    "back camera"
+                },
+            )
+        } catch (error: Exception) {
+            mapOf(
+                "maxFps" to 30,
+                "supportedFps" to listOf(30),
+                "recommendedVideoFpsMode" to "standard",
+                "source" to "fallback",
+                "message" to (error.message ?: "Camera capability query failed."),
+            )
         }
     }
 

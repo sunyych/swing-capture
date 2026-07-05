@@ -22,10 +22,12 @@ import '../../../../core/services/location_metadata_service.dart';
 import '../../../../core/services/video_thumbnail_service.dart';
 import '../../data/pose_clip_json_service.dart';
 import '../../data/pose_detection_service.dart';
+import '../../domain/models/dual_camera_sync.dart';
 import '../../domain/models/pose_frame.dart';
 import '../../domain/patterns/action_pattern_catalog.dart';
 import '../../domain/patterns/capture_model_catalog.dart';
 import '../../../../platform_channels/capture_platform_channel.dart';
+import '../../domain/services/dual_camera_sync_service.dart';
 import '../controllers/capture_controller.dart';
 import '../widgets/native_camera_preview.dart';
 
@@ -47,6 +49,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   final CapturePlatformChannel _capturePlatformChannel =
       const CapturePlatformChannel();
+  late final DualCameraSyncService _dualCameraSyncService;
   final List<CameraDescription> _cameras = [];
   final PoseDetectionService _poseDetectionService = PoseDetectionService();
 
@@ -59,6 +62,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   bool _isOpeningCamera = false;
   DateTime? _recordingStartedAt;
   ActionEvent? _pendingSwingEvent;
+  String? _pendingClipIdOverride;
   Timer? _autoStopTimer;
   Timer? _captureCooldownTimer;
   Timer? _recordingFrameWatchdog;
@@ -85,7 +89,15 @@ class _CapturePageState extends ConsumerState<CapturePage>
     'swingcapture/volume_keys',
   );
   StreamSubscription<dynamic>? _volumeKeySubscription;
+  StreamSubscription<DualCameraSyncState>? _dualCameraStateSubscription;
+  StreamSubscription<RemoteSwingTrigger>? _remoteSwingTriggerSubscription;
   DateTime? _lastHardwareTriggerActionAt;
+  DualCameraSyncState _dualCameraState = DualCameraSyncState.initial();
+  NativeRecordingCapability? _recordingCapability;
+  bool _isProfilingRecordingCapability = false;
+  bool _startupRecordingProfileApplied = false;
+  DualCameraRole? _appliedDualCameraRole;
+  int? _appliedDualCameraAdvertisedFps;
 
   bool get _isCameraReady => _useNativeCapturePipeline
       ? _nativePreviewReady
@@ -98,8 +110,17 @@ class _CapturePageState extends ConsumerState<CapturePage>
   static const double _nativePoseAspectRatio = 9 / 16;
 
   bool _autoDetectionEnabled(CaptureSettings settings) {
-    return settings.autoRecordOnReady;
+    return settings.autoRecordOnReady &&
+        settings.dualCameraRole != DualCameraRole.recorder;
   }
+
+  CaptureSettings _settingsOrDefaults() {
+    return ref.read(settingsControllerProvider).valueOrNull ??
+        CaptureSettings.defaults();
+  }
+
+  bool get _isRecorderOnlyRole =>
+      _settingsOrDefaults().dualCameraRole == DualCameraRole.recorder;
 
   bool get _sessionActive => _activeSessionId != null;
 
@@ -268,6 +289,18 @@ class _CapturePageState extends ConsumerState<CapturePage>
   @override
   void initState() {
     super.initState();
+    _dualCameraSyncService = DualCameraSyncService();
+    _dualCameraState = _dualCameraSyncService.state;
+    _dualCameraStateSubscription = _dualCameraSyncService.states.listen((
+      state,
+    ) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _dualCameraState = state);
+    });
+    _remoteSwingTriggerSubscription = _dualCameraSyncService.remoteTriggers
+        .listen((trigger) => unawaited(_handleRemoteSwingTrigger(trigger)));
     WidgetsBinding.instance.addObserver(this);
     if (_useNativeCapturePipeline) {
       _nativeCaptureSubscription = _capturePlatformChannel
@@ -291,6 +324,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
     _captureCooldownTimer?.cancel();
     _recordingFrameWatchdog?.cancel();
     _volumeKeySubscription?.cancel();
+    _dualCameraStateSubscription?.cancel();
+    _remoteSwingTriggerSubscription?.cancel();
     _nativeCaptureSubscription?.cancel();
     _nativeCaptureSubscription = null;
     _volumeKeySubscription = null;
@@ -300,6 +335,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     unawaited(WakelockPlus.disable());
     unawaited(_disposeCameraController());
     unawaited(_poseDetectionService.dispose());
+    unawaited(_dualCameraSyncService.dispose());
     super.dispose();
   }
 
@@ -529,6 +565,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       final microphoneStatus = await Permission.microphone.request();
       final hasCameraPermission = cameraStatus.isGranted;
       final hasMicrophonePermission = microphoneStatus.isGranted;
+      var settings = _settingsOrDefaults();
 
       ref
           .read(captureControllerProvider.notifier)
@@ -541,11 +578,14 @@ class _CapturePageState extends ConsumerState<CapturePage>
         return;
       }
 
+      settings = await _profileRecordingCapabilityIfNeeded(settings);
+      await _applyDualCameraSettings(settings);
       _enableAudio = hasMicrophonePermission;
       if (_useNativeCapturePipeline) {
         setState(() => _isOpeningCamera = true);
         try {
           await ref.read(captureControllerProvider.notifier).startSession();
+          await _applyRecorderOnlyDetectionMode(settings);
           await _ensureNativeRollingBufferArmed();
         } finally {
           if (mounted) {
@@ -579,7 +619,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
       // rolling buffer alive together, so arm it immediately when Capture opens.
       await _openSelectedCamera();
       await ref.read(captureControllerProvider.notifier).startSession();
-      await _startPoseStreamIfNeeded();
+      if (!_isRecorderOnlyRole) {
+        await _startPoseStreamIfNeeded();
+      }
       await _ensureNativeRollingBufferArmed();
     } catch (_) {
       ref
@@ -589,6 +631,101 @@ class _CapturePageState extends ConsumerState<CapturePage>
             hasMicrophonePermission: false,
           );
     }
+  }
+
+  Future<CaptureSettings> _profileRecordingCapabilityIfNeeded(
+    CaptureSettings settings,
+  ) async {
+    if (_startupRecordingProfileApplied || !settings.autoSelectBestFps) {
+      return settings;
+    }
+    _startupRecordingProfileApplied = true;
+    if (mounted) {
+      setState(() => _isProfilingRecordingCapability = true);
+    }
+    try {
+      final capability = await _capturePlatformChannel
+          .queryRecordingCapability();
+      if (!mounted) {
+        return settings;
+      }
+      setState(() => _recordingCapability = capability);
+      if (capability == null) {
+        return settings;
+      }
+      final nextMode = capability.recommendedFpsMode;
+      if (nextMode == settings.videoFpsMode) {
+        ref
+            .read(captureControllerProvider.notifier)
+            .setLastMessage(
+              'Recording profile checked: ${capability.summary}.',
+            );
+        return settings;
+      }
+      final next = settings.copyWith(videoFpsMode: nextMode);
+      await ref.read(settingsControllerProvider.notifier).updateSettings(next);
+      ref
+          .read(captureControllerProvider.notifier)
+          .setLastMessage(
+            'Recording set to fastest supported mode: ${capability.summary}.',
+          );
+      return next;
+    } catch (_) {
+      return settings;
+    } finally {
+      if (mounted) {
+        setState(() => _isProfilingRecordingCapability = false);
+      }
+    }
+  }
+
+  Future<void> _applyDualCameraSettings(CaptureSettings settings) async {
+    final advertisedFps =
+        _recordingCapability?.maxFps ?? settings.videoFpsMode.nominalTargetFps;
+    if (_appliedDualCameraRole == settings.dualCameraRole &&
+        _appliedDualCameraAdvertisedFps == advertisedFps) {
+      await _applyRecorderOnlyDetectionMode(settings);
+      return;
+    }
+    _appliedDualCameraRole = settings.dualCameraRole;
+    _appliedDualCameraAdvertisedFps = advertisedFps;
+    await _dualCameraSyncService.start(
+      role: settings.dualCameraRole,
+      advertisedFps: advertisedFps,
+    );
+    await _applyRecorderOnlyDetectionMode(settings);
+  }
+
+  void _queueApplyDualCameraSettings(CaptureSettings settings) {
+    final advertisedFps =
+        _recordingCapability?.maxFps ?? settings.videoFpsMode.nominalTargetFps;
+    if (_appliedDualCameraRole == settings.dualCameraRole &&
+        _appliedDualCameraAdvertisedFps == advertisedFps) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      unawaited(_applyDualCameraSettings(settings));
+    });
+  }
+
+  Future<void> _applyRecorderOnlyDetectionMode(CaptureSettings settings) async {
+    if (!_useNativeCapturePipeline ||
+        !ref.read(captureControllerProvider).isRunning) {
+      return;
+    }
+    try {
+      if (settings.dualCameraRole == DualCameraRole.recorder) {
+        await _capturePlatformChannel.stopDetection();
+        ref
+            .read(captureControllerProvider.notifier)
+            .setLastMessage('Recorder phone ready. Rolling buffer is armed.');
+      } else {
+        await _capturePlatformChannel.startDetection();
+      }
+    } catch (_) {}
   }
 
   Future<void> _startNativeRollingBuffer() async {
@@ -616,6 +753,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     _autoStopTimer?.cancel();
     _recordingStartedAt = null;
     _pendingSwingEvent = null;
+    _pendingClipIdOverride = null;
     ref.read(captureControllerProvider.notifier).setRecording(false);
     ref
         .read(captureControllerProvider.notifier)
@@ -630,7 +768,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
     }
 
     final rtmpSwingId = ref.read(captureControllerProvider).lastRtmpSwingId;
-    final clipId = (rtmpSwingId != null && rtmpSwingId.isNotEmpty)
+    final clipIdOverride = _pendingClipIdOverride;
+    final clipId = (clipIdOverride != null && clipIdOverride.isNotEmpty)
+        ? clipIdOverride
+        : (rtmpSwingId != null && rtmpSwingId.isNotEmpty)
         ? rtmpSwingId
         : DateTime.now().microsecondsSinceEpoch.toString();
     final outputPath = await _buildClipPath(clipId);
@@ -750,6 +891,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .setLastMessage(error.message ?? 'Saving buffered clip failed.');
     } finally {
       _pendingSwingEvent = null;
+      _pendingClipIdOverride = null;
       _isFinalizingBufferedClip = false;
       if (mounted) {
         setState(() {});
@@ -1044,6 +1186,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _startPoseStreamIfNeeded() async {
+    if (_isRecorderOnlyRole) {
+      return;
+    }
     final controller = _cameraController;
     final captureState = ref.read(captureControllerProvider);
     if (controller == null ||
@@ -1244,6 +1389,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     }
 
     final event = _fallbackSwingEvent();
+    final clipId = DateTime.now().microsecondsSinceEpoch.toString();
     _armCaptureLock(event);
     if (_useNativeCapturePipeline) {
       final captureState = ref.read(captureControllerProvider);
@@ -1254,7 +1400,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
         }
       }
       await _ensureNativeRollingBufferArmed();
+      _pendingClipIdOverride = clipId;
       _pendingSwingEvent = event;
+      unawaited(_broadcastDualCameraTrigger(event, swingId: clipId));
       ref
           .read(captureControllerProvider.notifier)
           .setBufferingActive(
@@ -1284,7 +1432,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
+    _pendingClipIdOverride = clipId;
     _pendingSwingEvent = event;
+    unawaited(_broadcastDualCameraTrigger(event, swingId: clipId));
     ref
         .read(captureControllerProvider.notifier)
         .setBufferingActive(
@@ -1300,6 +1450,84 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   Future<void> _triggerSwingEvent() async {
     await _startManualCaptureFromBuffer();
+  }
+
+  Future<void> _broadcastDualCameraTrigger(
+    ActionEvent event, {
+    required String swingId,
+  }) async {
+    final settings = _settingsOrDefaults();
+    if (settings.dualCameraRole != DualCameraRole.detector) {
+      return;
+    }
+    await _dualCameraSyncService.sendTrigger(
+      DualCameraTrigger(
+        swingId: swingId,
+        triggeredAt: event.triggeredAt,
+        preRollMs: _eventPreRollMs(event),
+        postRollMs: _eventPostRollMs(event),
+        score: event.score,
+        modelLabel: event.label,
+      ),
+    );
+  }
+
+  Future<void> _handleRemoteSwingTrigger(RemoteSwingTrigger trigger) async {
+    final settings = _settingsOrDefaults();
+    if (settings.dualCameraRole != DualCameraRole.recorder) {
+      return;
+    }
+    if (_pendingSwingEvent != null || _isFinalizingBufferedClip) {
+      return;
+    }
+    final event = ActionEvent(
+      label: trigger.modelLabel,
+      category: 'dual_camera',
+      triggeredAt: trigger.localTriggeredAt,
+      score: trigger.score,
+      preRollMs: trigger.preRollMs,
+      postRollMs: trigger.postRollMs,
+      windowStartAt: trigger.localTriggeredAt.subtract(
+        Duration(milliseconds: trigger.preRollMs),
+      ),
+      windowEndAt: trigger.localTriggeredAt.add(
+        Duration(milliseconds: trigger.postRollMs),
+      ),
+      reason: 'remote detector trigger from ${trigger.senderName}',
+    );
+    if (_isCaptureLocked()) {
+      ref
+          .read(captureControllerProvider.notifier)
+          .setLastMessage(_captureCooldownMessage());
+      return;
+    }
+
+    final captureState = ref.read(captureControllerProvider);
+    if (!captureState.isRunning) {
+      await _toggleSession();
+      if (!ref.read(captureControllerProvider).isRunning) {
+        return;
+      }
+    }
+    _pendingSwingEvent = event;
+    _pendingClipIdOverride = trigger.swingId;
+    _armCaptureLock(event, rearmBufferAfterCooldown: true);
+
+    if (_useNativeCapturePipeline) {
+      await _ensureNativeRollingBufferArmed();
+    } else if (!ref.read(captureControllerProvider).isRecording) {
+      await _startManualPreRollBuffer();
+    }
+    ref
+        .read(captureControllerProvider.notifier)
+        .setBufferingActive(
+          true,
+          lastMessage: 'Remote trigger received. Saving synchronized swing.',
+        );
+    _scheduleAutoFinalize(event);
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   void _handleCaptureStateTransition(
@@ -1330,6 +1558,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
           next.detectionState.stage == DetectionStage.swingDetected) {
         _pendingSwingEvent =
             next.lastActionEvent ?? _pendingSwingEvent ?? _fallbackSwingEvent();
+        final swingId =
+            next.lastRtmpSwingId ??
+            DateTime.now().microsecondsSinceEpoch.toString();
+        _pendingClipIdOverride = swingId;
+        unawaited(
+          _broadcastDualCameraTrigger(_pendingSwingEvent!, swingId: swingId),
+        );
         if (next.isRecording) {
           _scheduleAutoFinalize(_pendingSwingEvent!);
         } else if (_autoDetectionEnabled(settings)) {
@@ -1349,6 +1584,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
         next.detectionState.stage == DetectionStage.swingDetected) {
       _pendingSwingEvent =
           next.lastActionEvent ?? _pendingSwingEvent ?? _fallbackSwingEvent();
+      final swingId =
+          next.lastRtmpSwingId ??
+          DateTime.now().microsecondsSinceEpoch.toString();
+      _pendingClipIdOverride = swingId;
+      unawaited(
+        _broadcastDualCameraTrigger(_pendingSwingEvent!, swingId: swingId),
+      );
       if ((_cameraController?.value.isRecordingVideo ?? false) ||
           next.isRecording) {
         _scheduleAutoFinalize(_pendingSwingEvent!);
@@ -1539,6 +1781,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!saveClip || event == null) {
       await _safeDeleteFile(rawPath);
       _isFinalizingBufferedClip = false;
+      _pendingClipIdOverride = null;
       if (mounted) {
         setState(() {});
       }
@@ -1554,7 +1797,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .read(captureControllerProvider.notifier)
         .setSavingState('Saving pre-roll clip from the live buffer.');
 
-    final clipId = DateTime.now().microsecondsSinceEpoch.toString();
+    final clipId =
+        _pendingClipIdOverride ??
+        DateTime.now().microsecondsSinceEpoch.toString();
     final triggerMs = event.triggeredAt
         .difference(bufferStartedAt)
         .inMilliseconds
@@ -1637,6 +1882,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (trimmedPath != rawPath) {
       await _safeDeleteFile(rawPath);
     }
+    _pendingClipIdOverride = null;
     _isFinalizingBufferedClip = false;
 
     if (mounted) {
@@ -1935,6 +2181,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
   }
 
   Future<void> _showOptionsSheet() async {
+    var sheetSettings = _settingsOrDefaults();
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF0D1B22),
@@ -1971,6 +2218,44 @@ class _CapturePageState extends ConsumerState<CapturePage>
                       ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
                     ),
                     const SizedBox(height: 16),
+                    Text(
+                      'Dual phone',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 12),
+                    SegmentedButton<DualCameraRole>(
+                      segments: const [
+                        ButtonSegment<DualCameraRole>(
+                          value: DualCameraRole.disabled,
+                          icon: Icon(Icons.phone_android),
+                          label: Text('Solo'),
+                        ),
+                        ButtonSegment<DualCameraRole>(
+                          value: DualCameraRole.detector,
+                          icon: Icon(Icons.center_focus_strong),
+                          label: Text('Detect'),
+                        ),
+                        ButtonSegment<DualCameraRole>(
+                          value: DualCameraRole.recorder,
+                          icon: Icon(Icons.fiber_manual_record),
+                          label: Text('Record'),
+                        ),
+                      ],
+                      selected: {sheetSettings.dualCameraRole},
+                      onSelectionChanged: (selection) {
+                        final role = selection.first;
+                        final next = sheetSettings.copyWith(
+                          dualCameraRole: role,
+                        );
+                        setModalState(() => sheetSettings = next);
+                        unawaited(
+                          ref
+                              .read(settingsControllerProvider.notifier)
+                              .updateSettings(next),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 20),
                     Text(
                       'Resolution',
                       style: Theme.of(context).textTheme.titleSmall,
@@ -2076,9 +2361,38 @@ class _CapturePageState extends ConsumerState<CapturePage>
     );
   }
 
+  String? _dualCameraStatusLabel() {
+    final role = _dualCameraState.role;
+    if (!role.isActive) {
+      if (_isProfilingRecordingCapability) {
+        return 'Checking camera fps';
+      }
+      final capability = _recordingCapability;
+      return capability == null ? null : 'Recording ${capability.summary}';
+    }
+    final peerCount = _dualCameraState.peers.length;
+    final fps = _recordingCapability?.maxFps;
+    final fpsLabel = fps == null ? '' : ' · ${fps}fps';
+    return switch (role) {
+      DualCameraRole.disabled => null,
+      DualCameraRole.detector =>
+        peerCount == 0
+            ? 'Detector · waiting$fpsLabel'
+            : 'Detector · paired$fpsLabel',
+      DualCameraRole.recorder =>
+        peerCount == 0
+            ? 'Recorder · waiting$fpsLabel'
+            : 'Recorder · paired$fpsLabel',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(captureControllerProvider);
+    final settingsValue = ref.watch(settingsControllerProvider).valueOrNull;
+    if (settingsValue != null) {
+      _queueApplyDualCameraSettings(settingsValue);
+    }
     final detection = state.detectionState;
     ref.listen<CaptureSessionState>(captureControllerProvider, (
       previous,
@@ -2094,6 +2408,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
       final curr = next.valueOrNull;
       if (prev == null || curr == null) {
         return;
+      }
+      if (prev.dualCameraRole != curr.dualCameraRole) {
+        unawaited(_applyDualCameraSettings(curr));
       }
       if (prev.videoFpsMode == curr.videoFpsMode) {
         return;
@@ -2199,6 +2516,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                   detection: detection,
                   message: state.lastMessage,
                   rtmpLabel: _rtmpStatusLabel,
+                  dualCameraLabel: _dualCameraStatusLabel(),
                 ),
               ),
               Positioned(
@@ -2673,11 +2991,13 @@ class _StatusPanel extends StatelessWidget {
     required this.detection,
     required this.message,
     this.rtmpLabel,
+    this.dualCameraLabel,
   });
 
   final DetectionState detection;
   final String? message;
   final String? rtmpLabel;
+  final String? dualCameraLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -2731,6 +3051,13 @@ class _StatusPanel extends StatelessWidget {
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Colors.lightGreenAccent,
                     ),
+                  ),
+                if (dualCameraLabel != null && dualCameraLabel!.isNotEmpty)
+                  Text(
+                    dualCameraLabel!,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: Colors.cyanAccent),
                   ),
               ],
             ),

@@ -3,6 +3,8 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart';
 
+import '../core/models/capture_settings.dart';
+
 sealed class NativeCaptureEvent {
   const NativeCaptureEvent();
 
@@ -282,6 +284,56 @@ class NativeCaptureErrorEvent extends NativeCaptureEvent {
   final String message;
 }
 
+class NativeRecordingCapability {
+  const NativeRecordingCapability({
+    required this.maxFps,
+    required this.recommendedFpsMode,
+    required this.supportedFps,
+    required this.source,
+    this.cameraLabel,
+    this.message,
+  });
+
+  factory NativeRecordingCapability.fromMap(Map<dynamic, dynamic> map) {
+    final supported =
+        (map['supportedFps'] as List<dynamic>? ?? const [])
+            .whereType<num>()
+            .map((value) => value.toInt())
+            .toSet()
+            .toList()
+          ..sort();
+    final maxFps =
+        (map['maxFps'] as num?)?.toInt() ??
+        (supported.isEmpty ? 30 : supported.last);
+    final rawMode = map['recommendedVideoFpsMode'] as String?;
+    return NativeRecordingCapability(
+      maxFps: maxFps,
+      recommendedFpsMode: rawMode == null
+          ? recommendedVideoFpsModeForFps(maxFps)
+          : videoFpsModeFromWire(rawMode),
+      supportedFps: supported.isEmpty ? <int>[30] : supported,
+      source: map['source'] as String? ?? 'native',
+      cameraLabel: map['cameraLabel'] as String?,
+      message: map['message'] as String?,
+    );
+  }
+
+  final int maxFps;
+  final VideoFpsMode recommendedFpsMode;
+  final List<int> supportedFps;
+  final String source;
+  final String? cameraLabel;
+  final String? message;
+
+  String get summary {
+    final fps = maxFps <= 30 ? '30 fps' : '$maxFps fps';
+    final camera = cameraLabel == null || cameraLabel!.isEmpty
+        ? ''
+        : ' ${cameraLabel!}';
+    return '$fps$camera';
+  }
+}
+
 /// Method-channel contract for the native camera, ring buffer, gallery, and RTMP.
 class CapturePlatformChannel {
   const CapturePlatformChannel();
@@ -325,6 +377,23 @@ class CapturePlatformChannel {
       return;
     }
     await _methodChannel.invokeMethod<void>('startPreview');
+  }
+
+  Future<NativeRecordingCapability?> queryRecordingCapability() async {
+    if (!_useNativeEvents) {
+      return null;
+    }
+    try {
+      final result = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+        'queryRecordingCapability',
+      );
+      if (result == null) {
+        return null;
+      }
+      return NativeRecordingCapability.fromMap(result);
+    } on MissingPluginException {
+      return null;
+    }
   }
 
   Future<void> stopPreview() async {

@@ -100,6 +100,8 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       previewRequested = true
       sessionQueue.async { [weak self] in self?.rebuildSessionIfNeeded() }
       result(nil)
+    case "queryRecordingCapability":
+      result(queryRecordingCapability())
     case "stopPreview":
       stopPreview()
       result(nil)
@@ -330,6 +332,7 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       sendError(code: "camera_input_failed", message: "Unable to open camera.")
       return
     }
+    configureDeviceForCurrentVideoMode(device)
     session.addInput(input)
 
     if let audio = AVCaptureDevice.default(for: .audio),
@@ -415,6 +418,108 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
     case "fps240": return 240
     case "maxSupported": return 240
     default: return 30
+    }
+  }
+
+  private func recommendedModeForMaxFps(_ maxFps: Int) -> String {
+    if maxFps >= 240 { return "fps240" }
+    if maxFps >= 120 { return "fps120" }
+    if maxFps >= 60 { return "fps60" }
+    return "standard"
+  }
+
+  private func normalizedSupportedFps(for device: AVCaptureDevice) -> [Int] {
+    var values = Set<Int>([30])
+    for format in device.formats {
+      for range in format.videoSupportedFrameRateRanges {
+        let maxFps = Int(floor(range.maxFrameRate))
+        if maxFps >= 240 {
+          values.insert(240)
+        } else if maxFps >= 120 {
+          values.insert(120)
+        } else if maxFps >= 60 {
+          values.insert(60)
+        }
+      }
+    }
+    return values.sorted()
+  }
+
+  private func queryRecordingCapability() -> [String: Any] {
+    guard let device = cameraDevice() else {
+      return [
+        "maxFps": 30,
+        "supportedFps": [30],
+        "recommendedVideoFpsMode": "standard",
+        "source": "fallback",
+        "message": "No camera device is available.",
+      ]
+    }
+    let supported = normalizedSupportedFps(for: device)
+    let maxFps = supported.max() ?? 30
+    return [
+      "maxFps": maxFps,
+      "supportedFps": supported,
+      "recommendedVideoFpsMode": recommendedModeForMaxFps(maxFps),
+      "source": "avfoundation",
+      "cameraLabel": lensPosition == .back ? "back camera" : "front camera",
+    ]
+  }
+
+  private func targetFpsForCurrentDevice(_ device: AVCaptureDevice) -> Double {
+    if videoFpsMode == "maxSupported" {
+      return Double(normalizedSupportedFps(for: device).max() ?? 30)
+    }
+    return nominalTargetFps()
+  }
+
+  private func configureDeviceForCurrentVideoMode(_ device: AVCaptureDevice) {
+    let targetFps = targetFpsForCurrentDevice(device)
+    guard targetFps > 30 else { return }
+    var selectedFormat: AVCaptureDevice.Format?
+    var selectedMaxFps: Double = 0
+    var selectedArea: Int32 = 0
+
+    for format in device.formats {
+      var supportsTarget = false
+      var formatMaxFps: Double = 0
+      for range in format.videoSupportedFrameRateRanges {
+        formatMaxFps = max(formatMaxFps, range.maxFrameRate)
+        if range.maxFrameRate >= targetFps && range.minFrameRate <= targetFps {
+          supportsTarget = true
+        }
+      }
+      if !supportsTarget {
+        continue
+      }
+      let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+      let area = dimensions.width * dimensions.height
+      if selectedFormat == nil ||
+        formatMaxFps > selectedMaxFps ||
+        (formatMaxFps == selectedMaxFps && area > selectedArea) {
+        selectedFormat = format
+        selectedMaxFps = formatMaxFps
+        selectedArea = area
+      }
+    }
+    guard let format = selectedFormat else { return }
+
+    var locked = false
+    do {
+      try device.lockForConfiguration()
+      locked = true
+      device.activeFormat = format
+      let frameDuration = CMTime(
+        value: 1,
+        timescale: CMTimeScale(Int32(targetFps.rounded()))
+      )
+      device.activeVideoMinFrameDuration = frameDuration
+      device.activeVideoMaxFrameDuration = frameDuration
+      device.unlockForConfiguration()
+    } catch {
+      if locked {
+        device.unlockForConfiguration()
+      }
     }
   }
 

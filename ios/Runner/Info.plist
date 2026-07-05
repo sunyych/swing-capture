@@ -55,5 +55,7 @@
 	<string>MotionCapture accesses your photo library to import videos and save clips into the MotionCapture album.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>MotionCapture can attach field location metadata to captured clips.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MotionCapture uses the local network to synchronize swing capture between two phones.</string>
 </dict>
 </plist>

@@ -141,17 +141,73 @@ class _SettingsView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
+                    'Dual phone capture',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Use one phone to detect the swing and a second phone to keep a synchronized high-speed buffer.',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<DualCameraRole>(
+                    key: ValueKey(settings.dualCameraRole),
+                    initialValue: settings.dualCameraRole,
+                    decoration: const InputDecoration(
+                      labelText: 'This phone role',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: DualCameraRole.values
+                        .map(
+                          (role) => DropdownMenuItem<DualCameraRole>(
+                            value: role,
+                            child: Text(role.label),
+                          ),
+                        )
+                        .toList(growable: false),
+                    onChanged: (value) {
+                      if (value == null) {
+                        return;
+                      }
+                      onChanged(settings.copyWith(dualCameraRole: value));
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
                     'Rolling buffer video frame rate',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 8),
                   Text(
                     'Higher fps improves slow-motion clips but increases heat, battery use, and storage. Actual fps depends on the device; many phones fall back to 30–60 fps.',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.white70,
-                    ),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
                   ),
                   const SizedBox(height: 12),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: settings.autoSelectBestFps,
+                    title: const Text('Use fastest supported recording'),
+                    subtitle: const Text(
+                      'Checks this phone after camera permission and selects the highest safe frame-rate mode.',
+                    ),
+                    onChanged: (value) =>
+                        onChanged(settings.copyWith(autoSelectBestFps: value)),
+                  ),
+                  const SizedBox(height: 8),
                   DropdownButtonFormField<VideoFpsMode>(
                     key: ValueKey(settings.videoFpsMode),
                     initialValue: settings.videoFpsMode,
@@ -163,6 +219,10 @@ class _SettingsView extends StatelessWidget {
                       DropdownMenuItem(
                         value: VideoFpsMode.standard,
                         child: Text('Standard (~30 fps)'),
+                      ),
+                      DropdownMenuItem(
+                        value: VideoFpsMode.high60,
+                        child: Text('60 fps'),
                       ),
                       DropdownMenuItem(
                         value: VideoFpsMode.high120,
@@ -304,10 +364,7 @@ class _CaptureModelCard extends StatelessWidget {
 }
 
 class _RtmpSettingsCard extends StatefulWidget {
-  const _RtmpSettingsCard({
-    required this.settings,
-    required this.onChanged,
-  });
+  const _RtmpSettingsCard({required this.settings, required this.onChanged});
 
   final CaptureSettings settings;
   final ValueChanged<CaptureSettings> onChanged;
@@ -355,9 +412,9 @@ class _RtmpSettingsCardState extends State<_RtmpSettingsCard> {
             const SizedBox(height: 8),
             Text(
               'Live stream and per-swing clip republish. Put your full URL here (credentials and stream key can be embedded), e.g. rtmps://user:pass@host/app/live_key. Swing windows are tagged with AMF onSwingStart / onSwingEnd metadata on the live stream.',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.white70,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
             ),
             const SizedBox(height: 12),
             SwitchListTile.adaptive(
@@ -367,9 +424,8 @@ class _RtmpSettingsCardState extends State<_RtmpSettingsCard> {
               subtitle: const Text(
                 'When on, the capture session publishes a live stream and optional swing clips.',
               ),
-              onChanged: (v) => widget.onChanged(
-                widget.settings.copyWith(rtmpEnabled: v),
-              ),
+              onChanged: (v) =>
+                  widget.onChanged(widget.settings.copyWith(rtmpEnabled: v)),
             ),
             const SizedBox(height: 8),
             TextField(

@@ -5,6 +5,9 @@ enum VideoFpsMode {
   /// ~30 fps via quality presets (no explicit high-speed profile).
   standard,
 
+  /// High-speed capture at ~60 fps when hardware supports it.
+  high60,
+
   /// High-speed capture at ~120 fps when hardware supports it.
   high120,
 
@@ -18,45 +21,87 @@ enum VideoFpsMode {
 extension VideoFpsModeWire on VideoFpsMode {
   /// Serialized value for prefs and native method-channel payloads.
   String get wireValue => switch (this) {
-        VideoFpsMode.standard => 'standard',
-        VideoFpsMode.high120 => 'fps120',
-        VideoFpsMode.high240 => 'fps240',
-        VideoFpsMode.maxSupported => 'maxSupported',
-      };
+    VideoFpsMode.standard => 'standard',
+    VideoFpsMode.high60 => 'fps60',
+    VideoFpsMode.high120 => 'fps120',
+    VideoFpsMode.high240 => 'fps240',
+    VideoFpsMode.maxSupported => 'maxSupported',
+  };
 
   /// Nominal fps used for UI hints and bitrates (not a guarantee).
   int get nominalTargetFps => switch (this) {
-        VideoFpsMode.standard => 30,
-        VideoFpsMode.high120 => 120,
-        VideoFpsMode.high240 => 240,
-        VideoFpsMode.maxSupported => 240,
-      };
+    VideoFpsMode.standard => 30,
+    VideoFpsMode.high60 => 60,
+    VideoFpsMode.high120 => 120,
+    VideoFpsMode.high240 => 240,
+    VideoFpsMode.maxSupported => 240,
+  };
 }
 
 VideoFpsMode videoFpsModeFromWire(String? raw) => switch (raw) {
-      'fps120' => VideoFpsMode.high120,
-      'fps240' => VideoFpsMode.high240,
-      'maxSupported' => VideoFpsMode.maxSupported,
-      _ => VideoFpsMode.standard,
-    };
+  'fps60' => VideoFpsMode.high60,
+  'fps120' => VideoFpsMode.high120,
+  'fps240' => VideoFpsMode.high240,
+  'maxSupported' => VideoFpsMode.maxSupported,
+  _ => VideoFpsMode.standard,
+};
+
+VideoFpsMode recommendedVideoFpsModeForFps(int maxFps) {
+  if (maxFps >= 240) {
+    return VideoFpsMode.high240;
+  }
+  if (maxFps >= 120) {
+    return VideoFpsMode.high120;
+  }
+  if (maxFps >= 60) {
+    return VideoFpsMode.high60;
+  }
+  return VideoFpsMode.standard;
+}
 
 extension VideoFpsModeIosCapture on VideoFpsMode {
   /// Optional `CameraController` capture fps (`null` = plugin / OS default).
   int? get iosCaptureFps => switch (this) {
-        VideoFpsMode.standard => null,
-        VideoFpsMode.high120 => 120,
-        VideoFpsMode.high240 => 240,
-        VideoFpsMode.maxSupported => 240,
-      };
+    VideoFpsMode.standard => null,
+    VideoFpsMode.high60 => 60,
+    VideoFpsMode.high120 => 120,
+    VideoFpsMode.high240 => 240,
+    VideoFpsMode.maxSupported => 240,
+  };
 
   /// Optional video encoder bitrate (bits per second). High FPS needs more headroom.
   int? get iosVideoBitrate => switch (this) {
-        VideoFpsMode.standard => null,
-        VideoFpsMode.high120 => 28_000_000,
-        VideoFpsMode.high240 => 52_000_000,
-        VideoFpsMode.maxSupported => 56_000_000,
-      };
+    VideoFpsMode.standard => null,
+    VideoFpsMode.high60 => 16_000_000,
+    VideoFpsMode.high120 => 28_000_000,
+    VideoFpsMode.high240 => 52_000_000,
+    VideoFpsMode.maxSupported => 56_000_000,
+  };
 }
+
+enum DualCameraRole { disabled, detector, recorder }
+
+extension DualCameraRoleWire on DualCameraRole {
+  String get wireValue => switch (this) {
+    DualCameraRole.disabled => 'disabled',
+    DualCameraRole.detector => 'detector',
+    DualCameraRole.recorder => 'recorder',
+  };
+
+  String get label => switch (this) {
+    DualCameraRole.disabled => 'Single phone',
+    DualCameraRole.detector => 'Detector phone',
+    DualCameraRole.recorder => 'Recorder phone',
+  };
+
+  bool get isActive => this != DualCameraRole.disabled;
+}
+
+DualCameraRole dualCameraRoleFromWire(String? raw) => switch (raw) {
+  'detector' => DualCameraRole.detector,
+  'recorder' => DualCameraRole.recorder,
+  _ => DualCameraRole.disabled,
+};
 
 /// Runtime-configurable MVP settings persisted on device.
 class CaptureSettings {
@@ -69,6 +114,8 @@ class CaptureSettings {
     required this.autoRecordOnReady,
     required this.autoSaveToGallery,
     required this.videoFpsMode,
+    required this.autoSelectBestFps,
+    required this.dualCameraRole,
     this.autoRecordThreshold = 0.7,
     this.activeModelVersion = 'hybrid_v1',
     this.enableHybridLearning = true,
@@ -84,6 +131,8 @@ class CaptureSettings {
   final bool autoRecordOnReady;
   final bool autoSaveToGallery;
   final VideoFpsMode videoFpsMode;
+  final bool autoSelectBestFps;
+  final DualCameraRole dualCameraRole;
   final double autoRecordThreshold;
   final String activeModelVersion;
   final bool enableHybridLearning;
@@ -104,6 +153,8 @@ class CaptureSettings {
       autoRecordOnReady: true,
       autoSaveToGallery: true,
       videoFpsMode: VideoFpsMode.standard,
+      autoSelectBestFps: true,
+      dualCameraRole: DualCameraRole.disabled,
       autoRecordThreshold: 0.7,
       activeModelVersion: 'hybrid_v1',
       enableHybridLearning: true,
@@ -121,6 +172,8 @@ class CaptureSettings {
     bool? autoRecordOnReady,
     bool? autoSaveToGallery,
     VideoFpsMode? videoFpsMode,
+    bool? autoSelectBestFps,
+    DualCameraRole? dualCameraRole,
     double? autoRecordThreshold,
     String? activeModelVersion,
     bool? enableHybridLearning,
@@ -136,6 +189,8 @@ class CaptureSettings {
       autoRecordOnReady: autoRecordOnReady ?? this.autoRecordOnReady,
       autoSaveToGallery: autoSaveToGallery ?? this.autoSaveToGallery,
       videoFpsMode: videoFpsMode ?? this.videoFpsMode,
+      autoSelectBestFps: autoSelectBestFps ?? this.autoSelectBestFps,
+      dualCameraRole: dualCameraRole ?? this.dualCameraRole,
       autoRecordThreshold: autoRecordThreshold ?? this.autoRecordThreshold,
       activeModelVersion: activeModelVersion ?? this.activeModelVersion,
       enableHybridLearning: enableHybridLearning ?? this.enableHybridLearning,
@@ -154,6 +209,8 @@ class CaptureSettings {
       'autoRecordOnReady': autoRecordOnReady,
       'autoSaveToGallery': autoSaveToGallery,
       'videoFpsMode': videoFpsMode.wireValue,
+      'autoSelectBestFps': autoSelectBestFps,
+      'dualCameraRole': dualCameraRole.wireValue,
       'autoRecordThreshold': autoRecordThreshold,
       'activeModelVersion': activeModelVersion,
       'enableHybridLearning': enableHybridLearning,
@@ -166,19 +223,21 @@ class CaptureSettings {
     return CaptureSettings(
       preRollSeconds:
           (map['preRollSeconds'] as num?)?.toDouble() ??
-              AppConstants.defaultPreRollSeconds,
+          AppConstants.defaultPreRollSeconds,
       postRollSeconds:
           (map['postRollSeconds'] as num?)?.toDouble() ??
-              AppConstants.defaultPostRollSeconds,
+          AppConstants.defaultPostRollSeconds,
       swingCooldownMs:
           (map['swingCooldownMs'] as num?)?.toInt() ??
-              AppConstants.defaultCooldownMs,
+          AppConstants.defaultCooldownMs,
       captureModelId:
           map['captureModelId'] as String? ?? 'swing_tf_balance_20260423',
       showDebugSkeleton: map['showDebugSkeleton'] as bool? ?? true,
       autoRecordOnReady: map['autoRecordOnReady'] as bool? ?? true,
       autoSaveToGallery: map['autoSaveToGallery'] as bool? ?? true,
       videoFpsMode: videoFpsModeFromWire(map['videoFpsMode'] as String?),
+      autoSelectBestFps: map['autoSelectBestFps'] as bool? ?? true,
+      dualCameraRole: dualCameraRoleFromWire(map['dualCameraRole'] as String?),
       autoRecordThreshold:
           (map['autoRecordThreshold'] as num?)?.toDouble() ?? 0.7,
       activeModelVersion: map['activeModelVersion'] as String? ?? 'hybrid_v1',

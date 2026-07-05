@@ -108,6 +108,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "saveClip" -> saveClip(call, result)
                 "startPreview",
+                "queryRecordingCapability",
                 "stopPreview",
                 "startDetection",
                 "stopDetection",
