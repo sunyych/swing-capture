@@ -25,6 +25,8 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
   static const String _legacyVideoFpsPreferenceKey = 'video_fps_preference';
   static const String _autoSelectBestFpsKey = 'auto_select_best_fps';
   static const String _dualCameraRoleKey = 'dual_camera_role';
+  static const String _dualCameraTransportModeKey =
+      'dual_camera_transport_mode';
   static const String _rtmpUrlKey = 'rtmp_url';
   static const String _rtmpEnabledKey = 'rtmp_enabled';
 
@@ -39,7 +41,7 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
       'fps120' => VideoFpsMode.high120,
       'fps240' => VideoFpsMode.high240,
       'maxSupported' => VideoFpsMode.maxSupported,
-      _ => VideoFpsMode.standard,
+      _ => CaptureSettings.defaults().videoFpsMode,
     };
   }
 
@@ -69,6 +71,9 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
       dualCameraRole: dualCameraRoleFromWire(
         _prefs.getString(_dualCameraRoleKey),
       ),
+      dualCameraTransportMode: dualCameraTransportModeFromWire(
+        _prefs.getString(_dualCameraTransportModeKey),
+      ),
       rtmpUrl: _prefs.getString(_rtmpUrlKey) ?? '',
       rtmpEnabled: _prefs.getBool(_rtmpEnabledKey) ?? false,
     );
@@ -88,6 +93,10 @@ class SharedPrefsSettingsRepository implements SettingsRepository {
     await _prefs.setString(
       _dualCameraRoleKey,
       settings.dualCameraRole.wireValue,
+    );
+    await _prefs.setString(
+      _dualCameraTransportModeKey,
+      settings.dualCameraTransportMode.wireValue,
     );
     await _prefs.setString(_rtmpUrlKey, settings.rtmpUrl);
     await _prefs.setBool(_rtmpEnabledKey, settings.rtmpEnabled);

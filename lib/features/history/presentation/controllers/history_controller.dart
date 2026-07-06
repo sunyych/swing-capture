@@ -36,7 +36,7 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
   }
 
   Future<void> refresh({bool preserveVisibleItems = true}) async {
-    final previous = state.valueOrNull;
+    final previous = state.value;
     if (preserveVisibleItems && previous != null) {
       state = AsyncValue.data(previous);
     } else {
@@ -46,7 +46,7 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
   }
 
   Future<void> recordSaved(CaptureRecord record) async {
-    final current = state.valueOrNull;
+    final current = state.value;
     if (current == null) {
       await refresh(preserveVisibleItems: false);
       return;

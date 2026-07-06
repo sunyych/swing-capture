@@ -1,8 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:swingcapture/core/config/app_constants.dart';
 import 'package:swingcapture/core/models/capture_settings.dart';
+import 'package:swingcapture/features/settings/data/shared_prefs_settings_repository.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('videoFpsModeFromWire', () {
     test('maps wired tokens and defaults unknown/null to standard', () {
       expect(videoFpsModeFromWire(null), VideoFpsMode.standard);
@@ -51,7 +55,7 @@ void main() {
   });
 
   group('CaptureSettings', () {
-    test('defaults match AppConstants and standard fps', () {
+    test('defaults match AppConstants and high-speed fps', () {
       final d = CaptureSettings.defaults();
       expect(d.preRollSeconds, AppConstants.defaultPreRollSeconds);
       expect(d.postRollSeconds, AppConstants.defaultPostRollSeconds);
@@ -60,9 +64,10 @@ void main() {
       expect(d.showDebugSkeleton, isTrue);
       expect(d.autoRecordOnReady, isTrue);
       expect(d.autoSaveToGallery, isTrue);
-      expect(d.videoFpsMode, VideoFpsMode.standard);
+      expect(d.videoFpsMode, VideoFpsMode.high60);
       expect(d.autoSelectBestFps, isTrue);
       expect(d.dualCameraRole, DualCameraRole.disabled);
+      expect(d.dualCameraTransportMode, DualCameraTransportMode.wifi);
       expect(d.autoRecordThreshold, 0.7);
       expect(d.activeModelVersion, 'hybrid_v1');
       expect(d.enableHybridLearning, isTrue);
@@ -78,7 +83,7 @@ void main() {
       expect(parsed.showDebugSkeleton, defaults.showDebugSkeleton);
       expect(parsed.autoRecordOnReady, defaults.autoRecordOnReady);
       expect(parsed.autoSaveToGallery, defaults.autoSaveToGallery);
-      expect(parsed.videoFpsMode, VideoFpsMode.standard);
+      expect(parsed.videoFpsMode, defaults.videoFpsMode);
       expect(parsed.autoSelectBestFps, defaults.autoSelectBestFps);
       expect(parsed.dualCameraRole, defaults.dualCameraRole);
       expect(parsed.autoRecordThreshold, defaults.autoRecordThreshold);
@@ -100,6 +105,7 @@ void main() {
           videoFpsMode: VideoFpsMode.maxSupported,
           autoSelectBestFps: false,
           dualCameraRole: DualCameraRole.detector,
+          dualCameraTransportMode: DualCameraTransportMode.bluetoothControl,
           autoRecordThreshold: 0.82,
           activeModelVersion: 'hybrid_v2',
           enableHybridLearning: false,
@@ -115,6 +121,10 @@ void main() {
         expect(roundTrip.videoFpsMode, original.videoFpsMode);
         expect(roundTrip.autoSelectBestFps, original.autoSelectBestFps);
         expect(roundTrip.dualCameraRole, original.dualCameraRole);
+        expect(
+          roundTrip.dualCameraTransportMode,
+          original.dualCameraTransportMode,
+        );
         expect(roundTrip.autoRecordThreshold, original.autoRecordThreshold);
         expect(roundTrip.activeModelVersion, original.activeModelVersion);
         expect(roundTrip.enableHybridLearning, original.enableHybridLearning);
@@ -148,12 +158,114 @@ void main() {
       expect(recommendedVideoFpsModeForFps(240), VideoFpsMode.high240);
     });
 
+    test(
+      'minimumHighSpeedVideoFpsMode keeps rolling buffer at 60fps or above',
+      () {
+        expect(
+          minimumHighSpeedVideoFpsMode(VideoFpsMode.standard),
+          VideoFpsMode.high60,
+        );
+        expect(
+          minimumHighSpeedVideoFpsMode(VideoFpsMode.high60),
+          VideoFpsMode.high60,
+        );
+        expect(
+          minimumHighSpeedVideoFpsMode(VideoFpsMode.high120),
+          VideoFpsMode.high120,
+        );
+        expect(
+          minimumHighSpeedVideoFpsMode(VideoFpsMode.high240),
+          VideoFpsMode.high240,
+        );
+        expect(
+          minimumHighSpeedVideoFpsMode(VideoFpsMode.maxSupported),
+          VideoFpsMode.maxSupported,
+        );
+      },
+    );
+
+    test('recommendedSharedVideoFpsMode uses the lowest phone capability', () {
+      expect(sharedRecordingMaxFps(localMaxFps: 240, peerMaxFps: [120]), 120);
+      expect(
+        recommendedSharedVideoFpsMode(localMaxFps: 240, peerMaxFps: [120]),
+        VideoFpsMode.high120,
+      );
+      expect(
+        recommendedSharedVideoFpsMode(localMaxFps: 120, peerMaxFps: [240]),
+        VideoFpsMode.high120,
+      );
+      expect(
+        recommendedSharedVideoFpsMode(localMaxFps: 240, peerMaxFps: [59]),
+        VideoFpsMode.standard,
+      );
+    });
+
     test('dual camera role wire values round-trip', () {
       for (final role in DualCameraRole.values) {
         expect(dualCameraRoleFromWire(role.wireValue), role);
       }
       expect(dualCameraRoleFromWire(null), DualCameraRole.disabled);
       expect(dualCameraRoleFromWire('unknown'), DualCameraRole.disabled);
+    });
+
+    test('dual camera transport wire values round-trip', () {
+      for (final mode in DualCameraTransportMode.values) {
+        expect(dualCameraTransportModeFromWire(mode.wireValue), mode);
+      }
+      expect(
+        dualCameraTransportModeFromWire(null),
+        DualCameraTransportMode.wifi,
+      );
+      expect(
+        dualCameraTransportModeFromWire('unknown'),
+        DualCameraTransportMode.wifi,
+      );
+    });
+  });
+
+  group('SharedPrefsSettingsRepository', () {
+    test('persists dual camera role and bluetooth transport mode', () async {
+      SharedPreferences.setMockInitialValues(const {});
+      final prefs = await SharedPreferences.getInstance();
+      final repository = SharedPrefsSettingsRepository(prefs);
+      final settings = CaptureSettings.defaults().copyWith(
+        dualCameraRole: DualCameraRole.recorder,
+        dualCameraTransportMode: DualCameraTransportMode.bluetoothControl,
+        videoFpsMode: VideoFpsMode.high120,
+      );
+
+      await repository.saveSettings(settings);
+      final loaded = await repository.loadSettings();
+
+      expect(loaded.dualCameraRole, DualCameraRole.recorder);
+      expect(
+        loaded.dualCameraTransportMode,
+        DualCameraTransportMode.bluetoothControl,
+      );
+      expect(loaded.videoFpsMode, VideoFpsMode.high120);
+    });
+
+    test('defaults missing dual camera transport to wifi', () async {
+      SharedPreferences.setMockInitialValues({
+        'dual_camera_role': DualCameraRole.detector.wireValue,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final repository = SharedPrefsSettingsRepository(prefs);
+
+      final loaded = await repository.loadSettings();
+
+      expect(loaded.dualCameraRole, DualCameraRole.detector);
+      expect(loaded.dualCameraTransportMode, DualCameraTransportMode.wifi);
+    });
+
+    test('defaults missing fps preference to 60fps buffer recording', () async {
+      SharedPreferences.setMockInitialValues(const {});
+      final prefs = await SharedPreferences.getInstance();
+      final repository = SharedPrefsSettingsRepository(prefs);
+
+      final loaded = await repository.loadSettings();
+
+      expect(loaded.videoFpsMode, VideoFpsMode.high60);
     });
   });
 }

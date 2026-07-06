@@ -38,6 +38,10 @@ extension VideoFpsModeWire on VideoFpsMode {
   };
 }
 
+VideoFpsMode minimumHighSpeedVideoFpsMode(VideoFpsMode mode) {
+  return mode == VideoFpsMode.standard ? VideoFpsMode.high60 : mode;
+}
+
 VideoFpsMode videoFpsModeFromWire(String? raw) => switch (raw) {
   'fps60' => VideoFpsMode.high60,
   'fps120' => VideoFpsMode.high120,
@@ -57,6 +61,28 @@ VideoFpsMode recommendedVideoFpsModeForFps(int maxFps) {
     return VideoFpsMode.high60;
   }
   return VideoFpsMode.standard;
+}
+
+int sharedRecordingMaxFps({
+  required int localMaxFps,
+  Iterable<int?> peerMaxFps = const [],
+}) {
+  var sharedMaxFps = localMaxFps > 0 ? localMaxFps : 30;
+  for (final fps in peerMaxFps) {
+    if (fps != null && fps > 0 && fps < sharedMaxFps) {
+      sharedMaxFps = fps;
+    }
+  }
+  return sharedMaxFps;
+}
+
+VideoFpsMode recommendedSharedVideoFpsMode({
+  required int localMaxFps,
+  Iterable<int?> peerMaxFps = const [],
+}) {
+  return recommendedVideoFpsModeForFps(
+    sharedRecordingMaxFps(localMaxFps: localMaxFps, peerMaxFps: peerMaxFps),
+  );
 }
 
 extension VideoFpsModeIosCapture on VideoFpsMode {
@@ -103,6 +129,33 @@ DualCameraRole dualCameraRoleFromWire(String? raw) => switch (raw) {
   _ => DualCameraRole.disabled,
 };
 
+enum DualCameraTransportMode { wifi, bluetoothControl }
+
+extension DualCameraTransportModeWire on DualCameraTransportMode {
+  String get wireValue => switch (this) {
+    DualCameraTransportMode.wifi => 'wifi',
+    DualCameraTransportMode.bluetoothControl => 'bluetooth_control',
+  };
+
+  String get label => switch (this) {
+    DualCameraTransportMode.wifi => 'Wi-Fi sync',
+    DualCameraTransportMode.bluetoothControl => 'Bluetooth control',
+  };
+
+  String get summary => switch (this) {
+    DualCameraTransportMode.wifi =>
+      'Sync, transfer videos, and merge MKV on the detector phone.',
+    DualCameraTransportMode.bluetoothControl =>
+      'Sync capture without Wi-Fi. Videos queue for Wi-Fi merge later.',
+  };
+}
+
+DualCameraTransportMode dualCameraTransportModeFromWire(String? raw) =>
+    switch (raw) {
+      'bluetooth_control' => DualCameraTransportMode.bluetoothControl,
+      _ => DualCameraTransportMode.wifi,
+    };
+
 /// Runtime-configurable MVP settings persisted on device.
 class CaptureSettings {
   const CaptureSettings({
@@ -116,6 +169,7 @@ class CaptureSettings {
     required this.videoFpsMode,
     required this.autoSelectBestFps,
     required this.dualCameraRole,
+    required this.dualCameraTransportMode,
     this.autoRecordThreshold = 0.7,
     this.activeModelVersion = 'hybrid_v1',
     this.enableHybridLearning = true,
@@ -133,6 +187,7 @@ class CaptureSettings {
   final VideoFpsMode videoFpsMode;
   final bool autoSelectBestFps;
   final DualCameraRole dualCameraRole;
+  final DualCameraTransportMode dualCameraTransportMode;
   final double autoRecordThreshold;
   final String activeModelVersion;
   final bool enableHybridLearning;
@@ -152,9 +207,10 @@ class CaptureSettings {
       showDebugSkeleton: true,
       autoRecordOnReady: true,
       autoSaveToGallery: true,
-      videoFpsMode: VideoFpsMode.standard,
+      videoFpsMode: VideoFpsMode.high60,
       autoSelectBestFps: true,
       dualCameraRole: DualCameraRole.disabled,
+      dualCameraTransportMode: DualCameraTransportMode.wifi,
       autoRecordThreshold: 0.7,
       activeModelVersion: 'hybrid_v1',
       enableHybridLearning: true,
@@ -174,6 +230,7 @@ class CaptureSettings {
     VideoFpsMode? videoFpsMode,
     bool? autoSelectBestFps,
     DualCameraRole? dualCameraRole,
+    DualCameraTransportMode? dualCameraTransportMode,
     double? autoRecordThreshold,
     String? activeModelVersion,
     bool? enableHybridLearning,
@@ -191,6 +248,8 @@ class CaptureSettings {
       videoFpsMode: videoFpsMode ?? this.videoFpsMode,
       autoSelectBestFps: autoSelectBestFps ?? this.autoSelectBestFps,
       dualCameraRole: dualCameraRole ?? this.dualCameraRole,
+      dualCameraTransportMode:
+          dualCameraTransportMode ?? this.dualCameraTransportMode,
       autoRecordThreshold: autoRecordThreshold ?? this.autoRecordThreshold,
       activeModelVersion: activeModelVersion ?? this.activeModelVersion,
       enableHybridLearning: enableHybridLearning ?? this.enableHybridLearning,
@@ -211,6 +270,7 @@ class CaptureSettings {
       'videoFpsMode': videoFpsMode.wireValue,
       'autoSelectBestFps': autoSelectBestFps,
       'dualCameraRole': dualCameraRole.wireValue,
+      'dualCameraTransportMode': dualCameraTransportMode.wireValue,
       'autoRecordThreshold': autoRecordThreshold,
       'activeModelVersion': activeModelVersion,
       'enableHybridLearning': enableHybridLearning,
@@ -220,6 +280,7 @@ class CaptureSettings {
   }
 
   factory CaptureSettings.fromMap(Map<String, Object?> map) {
+    final rawVideoFpsMode = map['videoFpsMode'] as String?;
     return CaptureSettings(
       preRollSeconds:
           (map['preRollSeconds'] as num?)?.toDouble() ??
@@ -235,9 +296,14 @@ class CaptureSettings {
       showDebugSkeleton: map['showDebugSkeleton'] as bool? ?? true,
       autoRecordOnReady: map['autoRecordOnReady'] as bool? ?? true,
       autoSaveToGallery: map['autoSaveToGallery'] as bool? ?? true,
-      videoFpsMode: videoFpsModeFromWire(map['videoFpsMode'] as String?),
+      videoFpsMode: rawVideoFpsMode == null
+          ? CaptureSettings.defaults().videoFpsMode
+          : videoFpsModeFromWire(rawVideoFpsMode),
       autoSelectBestFps: map['autoSelectBestFps'] as bool? ?? true,
       dualCameraRole: dualCameraRoleFromWire(map['dualCameraRole'] as String?),
+      dualCameraTransportMode: dualCameraTransportModeFromWire(
+        map['dualCameraTransportMode'] as String?,
+      ),
       autoRecordThreshold:
           (map['autoRecordThreshold'] as num?)?.toDouble() ?? 0.7,
       activeModelVersion: map['activeModelVersion'] as String? ?? 'hybrid_v1',

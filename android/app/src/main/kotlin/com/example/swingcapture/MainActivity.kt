@@ -36,6 +36,8 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val channelName = "swingcapture/capture"
     private val captureEventChannelName = "swingcapture/capture_events"
+    private val dualCameraBleChannelName = "swingcapture/dual_camera_ble"
+    private val dualCameraBleEventChannelName = "swingcapture/dual_camera_ble_events"
     private val volumeKeyChannelName = "swingcapture/volume_keys"
     private val nativePreviewViewType = "swingcapture/native_preview"
     private val pickVideoRequestCode = 8401
@@ -51,10 +53,12 @@ class MainActivity : FlutterActivity() {
     private var pendingVideoPickFilePrefix: String? = null
     private val videoImportExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private lateinit var nativeCapturePipeline: NativeCapturePipeline
+    private lateinit var dualCameraBleControl: DualCameraBleControl
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         nativeCapturePipeline = NativeCapturePipeline(this)
+        dualCameraBleControl = DualCameraBleControl(this)
 
         flutterEngine.platformViewsController.registry.registerViewFactory(
             nativePreviewViewType,
@@ -93,6 +97,28 @@ class MainActivity : FlutterActivity() {
             },
         )
 
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            dualCameraBleEventChannelName,
+        ).setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    dualCameraBleControl.setEventSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    dualCameraBleControl.setEventSink(null)
+                }
+            },
+        )
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            dualCameraBleChannelName,
+        ).setMethodCallHandler { call, result ->
+            dualCameraBleControl.handleMethodCall(call, result)
+        }
+
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             channelName
@@ -129,6 +155,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        dualCameraBleControl.stop()
         nativeCapturePipeline.dispose()
         videoImportExecutor.shutdown()
         super.onDestroy()

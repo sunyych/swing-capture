@@ -284,12 +284,51 @@ class NativeCaptureErrorEvent extends NativeCaptureEvent {
   final String message;
 }
 
+class NativeRecordingLensCapability {
+  const NativeRecordingLensCapability({
+    required this.label,
+    required this.maxFps,
+    required this.supportedFps,
+    this.lensDirection,
+  });
+
+  factory NativeRecordingLensCapability.fromMap(Map<dynamic, dynamic> map) {
+    final supported =
+        (map['supportedFps'] as List<dynamic>? ?? const [])
+            .whereType<num>()
+            .map((value) => value.toInt())
+            .toSet()
+            .toList()
+          ..sort();
+    final maxFps =
+        (map['maxFps'] as num?)?.toInt() ??
+        (supported.isEmpty ? 30 : supported.last);
+    return NativeRecordingLensCapability(
+      label: map['cameraLabel'] as String? ?? 'camera',
+      maxFps: maxFps,
+      supportedFps: supported.isEmpty ? <int>[30] : supported,
+      lensDirection: map['lensDirection'] as String?,
+    );
+  }
+
+  final String label;
+  final int maxFps;
+  final List<int> supportedFps;
+  final String? lensDirection;
+
+  String get summary {
+    final fps = maxFps <= 30 ? '30 fps' : '$maxFps fps';
+    return '$label $fps';
+  }
+}
+
 class NativeRecordingCapability {
   const NativeRecordingCapability({
     required this.maxFps,
     required this.recommendedFpsMode,
     required this.supportedFps,
     required this.source,
+    this.lensCapabilities = const [],
     this.cameraLabel,
     this.message,
   });
@@ -306,6 +345,15 @@ class NativeRecordingCapability {
         (map['maxFps'] as num?)?.toInt() ??
         (supported.isEmpty ? 30 : supported.last);
     final rawMode = map['recommendedVideoFpsMode'] as String?;
+    final rawLensCapabilities = map['lensCapabilities'];
+    final lensCapabilities = <NativeRecordingLensCapability>[];
+    if (rawLensCapabilities is List) {
+      for (final item in rawLensCapabilities) {
+        if (item is Map) {
+          lensCapabilities.add(NativeRecordingLensCapability.fromMap(item));
+        }
+      }
+    }
     return NativeRecordingCapability(
       maxFps: maxFps,
       recommendedFpsMode: rawMode == null
@@ -313,6 +361,7 @@ class NativeRecordingCapability {
           : videoFpsModeFromWire(rawMode),
       supportedFps: supported.isEmpty ? <int>[30] : supported,
       source: map['source'] as String? ?? 'native',
+      lensCapabilities: lensCapabilities,
       cameraLabel: map['cameraLabel'] as String?,
       message: map['message'] as String?,
     );
@@ -322,6 +371,7 @@ class NativeRecordingCapability {
   final VideoFpsMode recommendedFpsMode;
   final List<int> supportedFps;
   final String source;
+  final List<NativeRecordingLensCapability> lensCapabilities;
   final String? cameraLabel;
   final String? message;
 
@@ -331,6 +381,13 @@ class NativeRecordingCapability {
         ? ''
         : ' ${cameraLabel!}';
     return '$fps$camera';
+  }
+
+  String? get lensSummary {
+    if (lensCapabilities.isEmpty) {
+      return null;
+    }
+    return lensCapabilities.map((capability) => capability.summary).join(', ');
   }
 }
 
@@ -534,8 +591,8 @@ class CapturePlatformChannel {
         'triggerEpochMs': triggerEpochMs,
         'preRollMs': preRollMs,
         'postRollMs': postRollMs,
-        if (score != null) 'score': score,
-        if (endedAtEpochMs != null) 'endedAtEpochMs': endedAtEpochMs,
+        'score': ?score,
+        'endedAtEpochMs': ?endedAtEpochMs,
       });
     } on MissingPluginException {
       // Stub build.
@@ -629,7 +686,7 @@ class CapturePlatformChannel {
           'videoPath': videoPath,
           'targetFps': targetFps,
           'maxFrames': maxFrames,
-          if (jobId != null) 'jobId': jobId,
+          'jobId': ?jobId,
         });
     if (result == null) {
       throw StateError('Native video pose extraction returned no result.');

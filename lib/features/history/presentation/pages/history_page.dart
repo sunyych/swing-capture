@@ -217,7 +217,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
     });
 
     final asyncHistory = ref.watch(historyControllerProvider);
-    final hasItems = asyncHistory.valueOrNull?.isNotEmpty ?? false;
+    final hasItems = asyncHistory.value?.isNotEmpty ?? false;
 
     return SafeArea(
       child: Padding(
@@ -237,7 +237,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
                 if (hasItems)
                   TextButton.icon(
                     onPressed: () {
-                      final data = asyncHistory.valueOrNull;
+                      final data = asyncHistory.value;
                       if (data != null) {
                         unawaited(_exportClips(data));
                       }
@@ -264,20 +264,20 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
               onEnterSelect: () => _enterSelectionMode(),
               onExitSelect: _exitSelectionMode,
               onSelectAll: () {
-                final data = asyncHistory.valueOrNull;
+                final data = asyncHistory.value;
                 if (data != null) {
                   _selectAll(data);
                 }
               },
               onClearSelection: _clearSelection,
               onExport: () {
-                final data = asyncHistory.valueOrNull;
+                final data = asyncHistory.value;
                 if (data != null) {
                   unawaited(_exportClips(data));
                 }
               },
               onDelete: () {
-                final data = asyncHistory.valueOrNull;
+                final data = asyncHistory.value;
                 if (data != null) {
                   unawaited(_confirmDeleteSelected(data));
                 }
@@ -458,7 +458,7 @@ class _HistoryGalleryTile extends StatelessWidget {
                   File(item.record.thumbnailPath),
                   fit: BoxFit.cover,
                   gaplessPlayback: true,
-                  errorBuilder: (_, __, ___) => const _ThumbPlaceholder(),
+                  errorBuilder: (_, _, _) => const _ThumbPlaceholder(),
                 )
               else
                 const _ThumbPlaceholder(),

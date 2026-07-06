@@ -75,7 +75,7 @@ class CaptureSessionState {
 
 /// Orchestrates the capture state machine and keeps Flutter usable before the
 /// native bridge is fully implemented.
-class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
+class CaptureController extends Notifier<CaptureSessionState> {
   final CapturePlatformChannel _channel = const CapturePlatformChannel();
   late List<ActionDetector> _actionDetectors;
   ActionPatternMatcher? _patternMatcher;
@@ -95,7 +95,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     ref.keepAlive();
 
     final settings =
-        ref.read(settingsControllerProvider).valueOrNull ??
+        ref.read(settingsControllerProvider).value ??
         CaptureSettings.defaults();
     _configureActionPattern(settings);
 
@@ -103,7 +103,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
       _,
       next,
     ) {
-      final s = next.valueOrNull;
+      final s = next.value;
       if (s == null) {
         return;
       }
@@ -140,7 +140,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     if (state.isRunning) return;
 
     final settings =
-        ref.read(settingsControllerProvider).valueOrNull ??
+        ref.read(settingsControllerProvider).value ??
         CaptureSettings.defaults();
 
     try {
@@ -210,12 +210,14 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
   /// Arms the Android CameraX rolling buffer with timing + FPS mode from settings.
   Future<void> startNativeRollingBuffer() async {
     final settings =
-        ref.read(settingsControllerProvider).valueOrNull ??
+        ref.read(settingsControllerProvider).value ??
         CaptureSettings.defaults();
     await _channel.startBuffering(
       preRollMs: (settings.preRollSeconds * 1000).round(),
       postRollMs: (settings.postRollSeconds * 1000).round(),
-      videoFpsMode: settings.videoFpsMode.wireValue,
+      videoFpsMode: minimumHighSpeedVideoFpsMode(
+        settings.videoFpsMode,
+      ).wireValue,
     );
   }
 
@@ -524,7 +526,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     PoseFrame? frame,
     double? completeness,
   }) {
-    final settings = ref.read(settingsControllerProvider).valueOrNull;
+    final settings = ref.read(settingsControllerProvider).value;
     final threshold = settings?.autoRecordThreshold ?? 0.7;
     if (event.score < threshold) {
       state = state.copyWith(
@@ -564,9 +566,7 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     final swingId = DateTime.now().microsecondsSinceEpoch.toString();
     final weight = event.score.clamp(0.0, 1.0);
     _rtmpSwingEndTimer?.cancel();
-    unawaited(
-      _channel.setRtmpSwingBitrate(swingActive: true),
-    );
+    unawaited(_channel.setRtmpSwingBitrate(swingActive: true));
     unawaited(
       _channel.sendSwingMarker(
         phase: 'start',
@@ -580,25 +580,22 @@ class CaptureController extends AutoDisposeNotifier<CaptureSessionState> {
     );
     final endAt = event.resolvedWindowEndAt;
     final wait = endAt.difference(DateTime.now());
-    _rtmpSwingEndTimer = Timer(
-      wait.isNegative ? Duration.zero : wait,
-      () {
-        _rtmpSwingEndTimer = null;
-        unawaited(
-          _channel.sendSwingMarker(
-            phase: 'end',
-            swingId: swingId,
-            weight: weight,
-            triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
-            preRollMs: event.preRollMs,
-            postRollMs: event.postRollMs,
-            score: event.score,
-            endedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
-          ),
-        );
-        unawaited(_channel.setRtmpSwingBitrate(swingActive: false));
-      },
-    );
+    _rtmpSwingEndTimer = Timer(wait.isNegative ? Duration.zero : wait, () {
+      _rtmpSwingEndTimer = null;
+      unawaited(
+        _channel.sendSwingMarker(
+          phase: 'end',
+          swingId: swingId,
+          weight: weight,
+          triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
+          preRollMs: event.preRollMs,
+          postRollMs: event.postRollMs,
+          score: event.score,
+          endedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      unawaited(_channel.setRtmpSwingBitrate(swingActive: false));
+    });
 
     state = state.copyWith(
       detectionState: state.detectionState.copyWith(

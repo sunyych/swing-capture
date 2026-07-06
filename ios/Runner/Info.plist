@@ -57,5 +57,7 @@
 	<string>MotionCapture can attach field location metadata to captured clips.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>MotionCapture uses the local network to synchronize swing capture between two phones.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>MotionCapture uses Bluetooth to synchronize dual-phone capture when Wi-Fi is unavailable.</string>
 </dict>
 </plist>

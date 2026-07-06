@@ -1,16 +1,16 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/config/app_constants.dart';
 import '../features/history/data/hive_history_repository.dart';
+import '../features/performance/data/startup_performance_repository.dart';
 import '../features/settings/data/shared_prefs_settings_repository.dart';
 import 'providers.dart';
 
 class AppBootstrap {
   const AppBootstrap({required this.overrides});
 
-  final List<Override> overrides;
+  final List<Object?> overrides;
 
   static Future<AppBootstrap> initialize() async {
     await Hive.initFlutter();
@@ -19,11 +19,16 @@ class AppBootstrap {
 
     final historyRepository = HiveHistoryRepository(historyBox);
     final settingsRepository = SharedPrefsSettingsRepository(prefs);
+    final startupPerformanceRepository =
+        SharedPrefsStartupPerformanceRepository(prefs);
 
     return AppBootstrap(
       overrides: [
         historyRepositoryProvider.overrideWithValue(historyRepository),
         settingsRepositoryProvider.overrideWithValue(settingsRepository),
+        startupPerformanceRepositoryProvider.overrideWithValue(
+          startupPerformanceRepository,
+        ),
       ],
     );
   }

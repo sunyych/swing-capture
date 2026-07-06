@@ -8,7 +8,7 @@ class TrainingPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(settingsControllerProvider).valueOrNull;
+    final settings = ref.watch(settingsControllerProvider).value;
 
     return SafeArea(
       child: Padding(

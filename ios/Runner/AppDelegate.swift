@@ -7,9 +7,12 @@ import Vision
 @objc class AppDelegate: FlutterAppDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
   private let captureChannelName = "swingcapture/capture"
   private let captureEventsName = "swingcapture/capture_events"
+  private let dualCameraBleChannelName = "swingcapture/dual_camera_ble"
+  private let dualCameraBleEventsName = "swingcapture/dual_camera_ble_events"
   private let previewTypeId = "swingcapture/native_preview"
 
   private var capturePipeline: NativeCapturePipeline?
+  private let dualCameraBleControl = DualCameraBleControl()
   private weak var flutterViewController: FlutterViewController?
   private var pendingVideoPickResult: FlutterResult?
   private var pendingVideoPickDestinationDirectory: String?
@@ -51,6 +54,14 @@ import Vision
       pipeline.handle(call, result: result)
     }
 
+    let bleMethodChannel = FlutterMethodChannel(
+      name: dualCameraBleChannelName,
+      binaryMessenger: controller.binaryMessenger
+    )
+    bleMethodChannel.setMethodCallHandler { [weak self] call, result in
+      self?.dualCameraBleControl.handle(call, result: result)
+    }
+
     let events = FlutterEventChannel(
       name: captureEventsName,
       binaryMessenger: controller.binaryMessenger
@@ -63,6 +74,12 @@ import Vision
         }
       )
     )
+
+    let bleEvents = FlutterEventChannel(
+      name: dualCameraBleEventsName,
+      binaryMessenger: controller.binaryMessenger
+    )
+    bleEvents.setStreamHandler(dualCameraBleControl)
 
     let factory = NativePreviewViewFactory(pipeline: pipeline)
     self.registrar(forPlugin: "com.swingcapture.native_preview")?.register(factory, withId: previewTypeId)

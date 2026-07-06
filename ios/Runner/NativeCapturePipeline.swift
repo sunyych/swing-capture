@@ -12,6 +12,11 @@ private struct BufferedSegment {
   let endEpochMs: Int64
 }
 
+private struct ZoomLens {
+  let device: AVCaptureDevice
+  let baseZoom: CGFloat
+}
+
 /// Parses `rtmp://host:1935/app/streamKey` → connect URL + stream name.
 private enum RtmpUrl {
   static func split(_ raw: String) -> (tcUrl: String, streamName: String)? {
@@ -48,13 +53,15 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   private var previewContainer: PreviewContainerView?
 
   private var lensPosition: AVCaptureDevice.Position = .back
+  private var activeCameraUniqueID: String?
+  private var requestedZoomRatio: CGFloat = 1
   private var previewRequested = false
   private var detectionEnabled = false
   private var bufferingEnabled = false
   private var preRollMs: Int64 = 3000
   private var postRollMs: Int64 = 3000
   private var segmentDurationMs: Int64 = 2000
-  private var videoFpsMode: String = "standard"
+  private var videoFpsMode: String = "fps60"
 
   private var currentRecordingURL: URL?
   private var currentSegmentStartEpochMs: Int64 = 0
@@ -142,6 +149,8 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       saveBufferedClip(outputPath: outputPath, triggerEpochMs: trigger.int64Value, result: result)
     case "switchCamera":
       lensPosition = lensPosition == .back ? .front : .back
+      activeCameraUniqueID = nil
+      requestedZoomRatio = 1
       sessionQueue.async { [weak self] in
         self?.rebuildSessionIfNeeded()
         self?.sendCameraState()
@@ -253,7 +262,7 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       return
     }
 
-    guard let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: lensPosition) else {
+    guard let cam = cameraDevice() else {
       result(FlutterError(code: "camera_unavailable", message: "No video device.", details: nil))
       sessionQueue.async { [weak self] in self?.rebuildSessionIfNeeded() }
       return
@@ -309,18 +318,23 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   private func tearDownCaptureSession() {
     sessionQueue.async { [weak self] in
       guard let self else { return }
-      self.movieOutput?.stopRecording()
-      self.movieOutput = nil
-      self.videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
-      self.videoDataOutput = nil
-      self.captureSession?.stopRunning()
-      self.captureSession = nil
+      self.tearDownCaptureSessionOnSessionQueue()
     }
+  }
+
+  private func tearDownCaptureSessionOnSessionQueue() {
+    movieOutput?.stopRecording()
+    movieOutput = nil
+    videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+    videoDataOutput = nil
+    captureSession?.stopRunning()
+    captureSession = nil
   }
 
   private func rebuildSessionIfNeeded() {
     if rtmpStream != nil { return }
     guard previewRequested, previewContainer != nil else { return }
+    tearDownCaptureSessionOnSessionQueue()
 
     let session = AVCaptureSession()
     session.sessionPreset = .hd1280x720
@@ -333,6 +347,7 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       return
     }
     configureDeviceForCurrentVideoMode(device)
+    applyZoom(to: device)
     session.addInput(input)
 
     if let audio = AVCaptureDevice.default(for: .audio),
@@ -368,31 +383,98 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   }
 
   private func cameraDevice() -> AVCaptureDevice? {
-    AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: lensPosition)
+    if let activeCameraUniqueID,
+       let active = zoomLenses(for: lensPosition)
+        .first(where: { $0.device.uniqueID == activeCameraUniqueID })?.device {
+      return active
+    }
+    guard let lens = lensForLogicalZoom(requestedZoomRatio) else {
+      return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: lensPosition)
+    }
+    activeCameraUniqueID = lens.device.uniqueID
+    return lens.device
+  }
+
+  private func zoomLenses(for position: AVCaptureDevice.Position) -> [ZoomLens] {
+    let deviceTypes: [AVCaptureDevice.DeviceType] = [
+      .builtInUltraWideCamera,
+      .builtInWideAngleCamera,
+      .builtInTelephotoCamera,
+    ]
+    let devices = AVCaptureDevice.DiscoverySession(
+      deviceTypes: deviceTypes,
+      mediaType: .video,
+      position: position
+    ).devices
+    guard !devices.isEmpty else { return [] }
+    let reference = devices.first(where: { $0.deviceType == .builtInWideAngleCamera }) ?? devices.first!
+    let referenceFov = max(CGFloat(reference.activeFormat.videoFieldOfView), 1)
+    return devices
+      .map { device in
+        let fov = max(CGFloat(device.activeFormat.videoFieldOfView), 1)
+        let base = tan(referenceFov * .pi / 360) / tan(fov * .pi / 360)
+        return ZoomLens(device: device, baseZoom: max(base, 0.1))
+      }
+      .sorted { $0.baseZoom < $1.baseZoom }
+  }
+
+  private func lensForLogicalZoom(_ ratio: CGFloat) -> ZoomLens? {
+    let lenses = zoomLenses(for: lensPosition)
+    guard !lenses.isEmpty else { return nil }
+    return lenses
+      .filter { $0.baseZoom <= ratio + 0.001 }
+      .max { $0.baseZoom < $1.baseZoom }
+      ?? lenses.first
+  }
+
+  private func logicalZoomRange() -> (min: CGFloat, max: CGFloat) {
+    let lenses = zoomLenses(for: lensPosition)
+    guard !lenses.isEmpty else { return (1, 1) }
+    let minZoom = lenses.map(\.baseZoom).min() ?? 1
+    let maxZoom = lenses
+      .map { $0.baseZoom * max($0.device.activeFormat.videoMaxZoomFactor, 1) }
+      .max() ?? minZoom
+    return (minZoom, max(maxZoom, minZoom))
   }
 
   private func applyZoom(_ ratio: CGFloat) {
-    guard let device = cameraDevice() else { return }
+    let range = logicalZoomRange()
+    requestedZoomRatio = min(max(ratio, range.min), range.max)
+    guard let lens = lensForLogicalZoom(requestedZoomRatio) else { return }
+    let nextCameraID = lens.device.uniqueID
+    if nextCameraID != activeCameraUniqueID {
+      activeCameraUniqueID = nextCameraID
+      rebuildSessionIfNeeded()
+      return
+    }
+    applyZoom(to: lens.device)
+    sendCameraState()
+  }
+
+  private func applyZoom(to device: AVCaptureDevice) {
+    let lenses = zoomLenses(for: lensPosition)
+    let baseZoom = lenses
+      .first(where: { $0.device.uniqueID == device.uniqueID })?
+      .baseZoom ?? 1
+    let maxZoom = max(device.activeFormat.videoMaxZoomFactor, 1)
+    let localZoom = min(max(requestedZoomRatio / baseZoom, 1), maxZoom)
     do {
       try device.lockForConfiguration()
-      let maxZ = device.activeFormat.videoMaxZoomFactor
-      device.videoZoomFactor = min(max(1, ratio), maxZ)
+      device.videoZoomFactor = localZoom
       device.unlockForConfiguration()
     } catch {}
   }
 
   private func sendCameraState() {
-    guard let device = cameraDevice() else { return }
-    let minZ: CGFloat = 1
-    let maxZ = device.activeFormat.videoMaxZoomFactor
-    let z = device.videoZoomFactor
+    let range = logicalZoomRange()
+    requestedZoomRatio = min(max(requestedZoomRatio, range.min), range.max)
     emit(
       [
         "type": "camera_state",
         "lensDirection": lensPosition == .back ? "back" : "front",
-        "minZoom": minZ,
-        "maxZoom": maxZ,
-        "zoom": z,
+        "minZoom": range.min,
+        "maxZoom": range.max,
+        "zoom": requestedZoomRatio,
       ]
     )
   }
@@ -446,7 +528,17 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   }
 
   private func queryRecordingCapability() -> [String: Any] {
-    guard let device = cameraDevice() else {
+    var seen = Set<String>()
+    let lenses = [AVCaptureDevice.Position.back, .front]
+      .flatMap { zoomLenses(for: $0) }
+      .filter { lens in
+        if seen.contains(lens.device.uniqueID) {
+          return false
+        }
+        seen.insert(lens.device.uniqueID)
+        return true
+      }
+    guard !lenses.isEmpty else {
       return [
         "maxFps": 30,
         "supportedFps": [30],
@@ -455,15 +547,43 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
         "message": "No camera device is available.",
       ]
     }
-    let supported = normalizedSupportedFps(for: device)
+    let lensCapabilities = lenses.map { lens -> [String: Any] in
+      let supported = normalizedSupportedFps(for: lens.device)
+      let maxFps = supported.max() ?? 30
+      return [
+        "cameraId": lens.device.uniqueID,
+        "lensDirection": lens.device.position == .front ? "front" : "back",
+        "cameraLabel": cameraCapabilityLabel(for: lens),
+        "maxFps": maxFps,
+        "supportedFps": supported,
+      ]
+    }
+    let supported = commonSupportedFps(lensCapabilities)
     let maxFps = supported.max() ?? 30
     return [
       "maxFps": maxFps,
       "supportedFps": supported,
       "recommendedVideoFpsMode": recommendedModeForMaxFps(maxFps),
       "source": "avfoundation",
-      "cameraLabel": lensPosition == .back ? "back camera" : "front camera",
+      "cameraLabel": "across \(lensCapabilities.count) lenses",
+      "lensCapabilities": lensCapabilities,
     ]
+  }
+
+  private func commonSupportedFps(_ lensCapabilities: [[String: Any]]) -> [Int] {
+    var common: Set<Int>?
+    for capability in lensCapabilities {
+      let supported = Set(capability["supportedFps"] as? [Int] ?? [30])
+      common = common.map { $0.intersection(supported) } ?? supported
+    }
+    return Array(common ?? [30]).isEmpty ? [30] : Array(common ?? [30]).sorted()
+  }
+
+  private func cameraCapabilityLabel(for lens: ZoomLens) -> String {
+    if lens.device.position == .front {
+      return "front camera"
+    }
+    return String(format: "back %.1fx lens", Double(lens.baseZoom))
   }
 
   private func targetFpsForCurrentDevice(_ device: AVCaptureDevice) -> Double {
@@ -525,8 +645,11 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
 
   private func computeSegmentSliceMs(preRollMs: Int64, postRollMs: Int64) -> Int64 {
     let ring = preRollMs + postRollMs + 1500
-    let slice = ring / 5
-    return min(max(slice, 600), 2800)
+    let highSpeed = videoFpsMode != "standard"
+    let slice = ring / (highSpeed ? 3 : 5)
+    let minSlice: Int64 = highSpeed ? 1800 : 600
+    let maxSlice: Int64 = highSpeed ? 4500 : 2800
+    return min(max(slice, minSlice), maxSlice)
   }
 
   private func stopBuffering(discardSegments: Bool) {

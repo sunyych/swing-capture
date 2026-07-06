@@ -13,6 +13,7 @@ class DualCameraPeer {
     required this.controlPort,
     required this.lastSeenAt,
     required this.clockOffsetMs,
+    this.transport = DualCameraTransportMode.wifi,
     this.advertisedFps,
   });
 
@@ -25,10 +26,13 @@ class DualCameraPeer {
 
   /// Approximate remote wall-clock minus local wall-clock.
   final int clockOffsetMs;
+  final DualCameraTransportMode transport;
   final int? advertisedFps;
 
   bool get canReceiveTriggers =>
-      role == DualCameraRole.recorder && controlPort > 0;
+      role == DualCameraRole.recorder &&
+      (transport == DualCameraTransportMode.bluetoothControl ||
+          controlPort > 0);
 
   DualCameraPeer copyWith({
     String? deviceName,
@@ -37,6 +41,7 @@ class DualCameraPeer {
     int? controlPort,
     DateTime? lastSeenAt,
     int? clockOffsetMs,
+    DualCameraTransportMode? transport,
     int? advertisedFps,
   }) {
     return DualCameraPeer(
@@ -47,6 +52,7 @@ class DualCameraPeer {
       controlPort: controlPort ?? this.controlPort,
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
       clockOffsetMs: clockOffsetMs ?? this.clockOffsetMs,
+      transport: transport ?? this.transport,
       advertisedFps: advertisedFps ?? this.advertisedFps,
     );
   }
@@ -94,6 +100,30 @@ class RemoteSwingTrigger {
   final DateTime receivedAt;
 }
 
+class RemoteDualCameraClip {
+  const RemoteDualCameraClip({
+    required this.swingId,
+    required this.senderDeviceId,
+    required this.senderName,
+    required this.filePath,
+    required this.fileSizeBytes,
+    required this.receivedAt,
+    required this.preRollMs,
+    required this.postRollMs,
+    this.durationMs,
+  });
+
+  final String swingId;
+  final String senderDeviceId;
+  final String senderName;
+  final String filePath;
+  final int fileSizeBytes;
+  final DateTime receivedAt;
+  final int preRollMs;
+  final int postRollMs;
+  final int? durationMs;
+}
+
 class DualCameraSyncState {
   const DualCameraSyncState({
     required this.role,
@@ -101,6 +131,7 @@ class DualCameraSyncState {
     required this.localDeviceId,
     required this.localDeviceName,
     required this.controlPort,
+    required this.transport,
     required this.peers,
     required this.message,
     this.lastTrigger,
@@ -116,6 +147,7 @@ class DualCameraSyncState {
       localDeviceId: localDeviceId,
       localDeviceName: localDeviceName,
       controlPort: 0,
+      transport: DualCameraTransportMode.wifi,
       peers: const [],
       message: 'Dual camera is off.',
     );
@@ -126,6 +158,7 @@ class DualCameraSyncState {
   final String localDeviceId;
   final String localDeviceName;
   final int controlPort;
+  final DualCameraTransportMode transport;
   final List<DualCameraPeer> peers;
   final String message;
   final RemoteSwingTrigger? lastTrigger;
@@ -139,6 +172,7 @@ class DualCameraSyncState {
     String? localDeviceId,
     String? localDeviceName,
     int? controlPort,
+    DualCameraTransportMode? transport,
     List<DualCameraPeer>? peers,
     String? message,
     RemoteSwingTrigger? lastTrigger,
@@ -149,6 +183,7 @@ class DualCameraSyncState {
       localDeviceId: localDeviceId ?? this.localDeviceId,
       localDeviceName: localDeviceName ?? this.localDeviceName,
       controlPort: controlPort ?? this.controlPort,
+      transport: transport ?? this.transport,
       peers: peers ?? this.peers,
       message: message ?? this.message,
       lastTrigger: lastTrigger ?? this.lastTrigger,
@@ -165,6 +200,7 @@ class DualCameraProtocol {
     required DualCameraRole role,
     required int controlPort,
     required DateTime sentAt,
+    DualCameraTransportMode transport = DualCameraTransportMode.wifi,
     int? advertisedFps,
   }) {
     return {
@@ -175,8 +211,9 @@ class DualCameraProtocol {
       'deviceName': deviceName,
       'role': role.wireValue,
       'controlPort': controlPort,
+      'transport': transport.wireValue,
       'sentAtEpochMs': sentAt.millisecondsSinceEpoch,
-      if (advertisedFps != null) 'advertisedFps': advertisedFps,
+      'advertisedFps': ?advertisedFps,
     };
   }
 
@@ -185,6 +222,7 @@ class DualCameraProtocol {
     required String address,
     required DateTime receivedAt,
     required String localDeviceId,
+    DualCameraTransportMode? transport,
   }) {
     if (payload['app'] != dualCameraSyncAppId ||
         payload['type'] != 'hello' ||
@@ -211,6 +249,9 @@ class DualCameraProtocol {
       controlPort: (payload['controlPort'] as num?)?.toInt() ?? 0,
       lastSeenAt: receivedAt,
       clockOffsetMs: clockOffsetMs,
+      transport:
+          transport ??
+          dualCameraTransportModeFromWire(payload['transport'] as String?),
       advertisedFps: (payload['advertisedFps'] as num?)?.toInt(),
     );
   }
@@ -235,6 +276,39 @@ class DualCameraProtocol {
       'modelLabel': trigger.modelLabel,
       'sentAtEpochMs': sentAt.millisecondsSinceEpoch,
     };
+  }
+
+  static Map<String, Object?> clipUploadHeaderPayload({
+    required String senderDeviceId,
+    required String senderName,
+    required String swingId,
+    required String fileName,
+    required int fileSizeBytes,
+    required int preRollMs,
+    required int postRollMs,
+    required DateTime sentAt,
+    int? durationMs,
+  }) {
+    return {
+      'app': dualCameraSyncAppId,
+      'version': dualCameraSyncProtocolVersion,
+      'type': 'clip_upload',
+      'senderDeviceId': senderDeviceId,
+      'senderName': senderName,
+      'swingId': swingId,
+      'fileName': fileName,
+      'fileSizeBytes': fileSizeBytes,
+      'preRollMs': preRollMs,
+      'postRollMs': postRollMs,
+      'durationMs': ?durationMs,
+      'sentAtEpochMs': sentAt.millisecondsSinceEpoch,
+    };
+  }
+
+  static bool isClipUploadHeader(Map<String, Object?> payload) {
+    return payload['app'] == dualCameraSyncAppId &&
+        payload['type'] == 'clip_upload' &&
+        payload['version'] == dualCameraSyncProtocolVersion;
   }
 
   static RemoteSwingTrigger? remoteTriggerFromPayload({

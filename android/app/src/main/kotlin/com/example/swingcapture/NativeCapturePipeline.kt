@@ -18,6 +18,8 @@ import android.util.Range
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -62,6 +64,15 @@ private data class BufferedSegment(
     val endEpochMs: Long,
 )
 
+private data class ZoomLens(
+    val logicalCameraId: String,
+    val physicalCameraId: String?,
+    val baseZoom: Float,
+    val maxDigitalZoom: Float,
+) {
+    val selectionId: String get() = physicalCameraId ?: logicalCameraId
+}
+
 class NativeCapturePipeline(
     private val activity: FlutterActivity,
 ) {
@@ -88,6 +99,8 @@ class NativeCapturePipeline(
     private var detectionEnabled = false
     private var isProcessingPose = false
     private var lensFacing = CameraSelector.LENS_FACING_BACK
+    private var selectedLensId: String? = null
+    private var requestedZoomRatio = 1f
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -103,7 +116,7 @@ class NativeCapturePipeline(
      * Wire value from Dart [VideoFpsMode] (`standard`, `fps120`, `fps240`, `maxSupported`).
      * Legacy `VideoFpsPreference` enum names are still accepted for rebinds.
      */
-    private var videoFpsMode: String = "standard"
+    private var videoFpsMode: String = "fps60"
     private var lastAchievedFps: Double? = null
     /** Wall-clock slice length for each rolling file; recomputed when buffering arms. */
     private var segmentDurationMs = 1000L
@@ -240,13 +253,14 @@ class NativeCapturePipeline(
                 } else {
                     CameraSelector.LENS_FACING_BACK
                 }
+                selectedLensId = null
+                requestedZoomRatio = 1f
                 bindUseCasesIfReady()
                 result.success(mapOf("lensDirection" to lensDirectionLabel()))
             }
             "setZoomRatio" -> {
-                val ratio = (call.arguments as? Number)?.toFloat()?.coerceAtLeast(1f) ?: 1f
-                camera?.cameraControl?.setZoomRatio(ratio)
-                sendCameraState()
+                val ratio = (call.arguments as? Number)?.toFloat() ?: 1f
+                applyLogicalZoom(ratio)
                 result.success(null)
             }
             "startRtmpStream" -> {
@@ -504,59 +518,54 @@ class NativeCapturePipeline(
         return try {
             val cameraManager =
                 activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            var selectedCameraId: String? = null
-            var selectedFacing = CameraCharacteristics.LENS_FACING_BACK
-            for (cameraId in cameraManager.cameraIdList) {
-                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val lensCapabilities = zoomLensesForAllFacings().mapNotNull { lens ->
+                val characteristics = cameraCharacteristicsForLens(cameraManager, lens)
+                    ?: return@mapNotNull null
                 val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-                if (selectedCameraId == null || facing == CameraCharacteristics.LENS_FACING_BACK) {
-                    selectedCameraId = cameraId
-                    selectedFacing = facing ?: CameraCharacteristics.LENS_FACING_BACK
-                    if (facing == CameraCharacteristics.LENS_FACING_BACK) {
-                        break
+                val supported = supportedFpsForCharacteristics(characteristics)
+                val maxFps = supported.maxOrNull() ?: 30
+                mutableMapOf<String, Any>(
+                    "cameraId" to lens.selectionId,
+                    "logicalCameraId" to lens.logicalCameraId,
+                    "lensDirection" to lensDirectionLabel(facing),
+                    "cameraLabel" to cameraCapabilityLabel(lens, facing),
+                    "maxFps" to maxFps,
+                    "supportedFps" to supported,
+                ).also { payload ->
+                    lens.physicalCameraId?.let { physicalId ->
+                        payload["physicalCameraId"] = physicalId
                     }
                 }
+            }.sortedWith(
+                compareBy<Map<String, Any>> {
+                    when (it["lensDirection"] as? String) {
+                        "back" -> 0
+                        "front" -> 1
+                        else -> 2
+                    }
+                }.thenBy {
+                    (it["cameraLabel"] as? String).orEmpty()
+                },
+            )
+            if (lensCapabilities.isEmpty()) {
+                return mapOf(
+                    "maxFps" to 30,
+                    "supportedFps" to listOf(30),
+                    "recommendedVideoFpsMode" to "standard",
+                    "source" to "fallback",
+                    "message" to "No camera devices were reported.",
+                )
             }
 
-            val supportedFps = mutableSetOf(30)
-            if (selectedCameraId != null) {
-                val characteristics = cameraManager.getCameraCharacteristics(selectedCameraId)
-                characteristics
-                    .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-                    ?.forEach { range ->
-                        supportedFps.add(range.upper)
-                    }
-                characteristics
-                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                    ?.highSpeedVideoFpsRanges
-                    ?.forEach { range ->
-                        supportedFps.add(range.upper)
-                    }
-            }
-
-            val normalized = supportedFps
-                .filter { it > 0 }
-                .map {
-                    when {
-                        it >= 240 -> 240
-                        it >= 120 -> 120
-                        it >= 60 -> 60
-                        else -> 30
-                    }
-                }
-                .toSet()
-                .sorted()
+            val normalized = commonSupportedFps(lensCapabilities)
             val maxFps = normalized.maxOrNull() ?: 30
             mapOf(
                 "maxFps" to maxFps,
                 "supportedFps" to normalized,
                 "recommendedVideoFpsMode" to recommendedModeForMaxFps(maxFps),
                 "source" to "camera2",
-                "cameraLabel" to if (selectedFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-                    "front camera"
-                } else {
-                    "back camera"
-                },
+                "cameraLabel" to "across ${lensCapabilities.size} lenses",
+                "lensCapabilities" to lensCapabilities,
             )
         } catch (error: Exception) {
             mapOf(
@@ -567,6 +576,280 @@ class NativeCapturePipeline(
                 "message" to (error.message ?: "Camera capability query failed."),
             )
         }
+    }
+
+    private fun supportedFpsForCharacteristics(
+        characteristics: CameraCharacteristics,
+    ): List<Int> {
+        val supportedFps = mutableSetOf(30)
+        characteristics
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.forEach { range ->
+                supportedFps.add(range.upper)
+            }
+        characteristics
+            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.highSpeedVideoFpsRanges
+            ?.forEach { range ->
+                supportedFps.add(range.upper)
+            }
+        return normalizeFpsBuckets(supportedFps)
+    }
+
+    private fun normalizeFpsBuckets(values: Iterable<Int>): List<Int> {
+        return values
+            .filter { it > 0 }
+            .map {
+                when {
+                    it >= 240 -> 240
+                    it >= 120 -> 120
+                    it >= 60 -> 60
+                    else -> 30
+                }
+            }
+            .toSet()
+            .sorted()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun commonSupportedFps(
+        lensCapabilities: List<Map<String, Any>>,
+    ): List<Int> {
+        var common: Set<Int>? = null
+        for (capability in lensCapabilities) {
+            val supported = capability["supportedFps"] as? List<Int> ?: listOf(30)
+            common = common?.intersect(supported.toSet()) ?: supported.toSet()
+        }
+        return (common ?: setOf(30)).ifEmpty { setOf(30) }.sorted()
+    }
+
+    private fun cameraCapabilityLabel(lens: ZoomLens, facing: Int?): String {
+        val direction = lensDirectionLabel(facing)
+        if (direction == "back") {
+            return "$direction ${String.format("%.1fx", lens.baseZoom)} lens"
+        }
+        return "$direction camera ${lens.selectionId}"
+    }
+
+    private fun lensDirectionLabel(facing: Int?): String {
+        return when (facing) {
+            CameraCharacteristics.LENS_FACING_FRONT -> "front"
+            CameraCharacteristics.LENS_FACING_BACK -> "back"
+            CameraCharacteristics.LENS_FACING_EXTERNAL -> "external"
+            else -> "camera"
+        }
+    }
+
+    private fun zoomLensesForAllFacings(): List<ZoomLens> {
+        return listOf(
+            CameraCharacteristics.LENS_FACING_BACK,
+            CameraCharacteristics.LENS_FACING_FRONT,
+            CameraCharacteristics.LENS_FACING_EXTERNAL,
+        )
+            .flatMap { facing -> zoomLensesForFacing(facing) }
+            .distinctBy { it.selectionId }
+    }
+
+    private fun zoomLensesForFacing(facing: Int): List<ZoomLens> {
+        return try {
+            val cameraManager =
+                activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val candidates = zoomLensCandidatesForFacing(cameraManager, facing)
+            if (candidates.isEmpty()) {
+                return emptyList()
+            }
+            val focalLengths = candidates
+                .mapNotNull { (_, _, characteristics) ->
+                    characteristics
+                        .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?.firstOrNull()
+                        ?.takeIf { it > 0f }
+                }
+            val referenceFocalLength = referenceFocalLengthForZoom(focalLengths)
+
+            candidates
+                .mapNotNull { (logicalCameraId, physicalCameraId, characteristics) ->
+                    val focalLength = characteristics
+                        .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?.firstOrNull()
+                        ?.takeIf { it > 0f }
+                        ?: return@mapNotNull null
+                    val maxDigitalZoom = characteristics
+                        .get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+                        ?.coerceAtLeast(1f)
+                        ?: 1f
+                    ZoomLens(
+                        logicalCameraId = logicalCameraId,
+                        physicalCameraId = physicalCameraId,
+                        baseZoom = (focalLength / referenceFocalLength).coerceAtLeast(0.1f),
+                        maxDigitalZoom = maxDigitalZoom,
+                    )
+                }
+                .sortedBy { it.baseZoom }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun zoomLensCandidatesForFacing(
+        cameraManager: CameraManager,
+        facing: Int,
+    ): List<Triple<String, String?, CameraCharacteristics>> {
+        val candidates = mutableListOf<Triple<String, String?, CameraCharacteristics>>()
+        for (logicalCameraId in cameraManager.cameraIdList) {
+            val logicalCharacteristics = cameraManager.getCameraCharacteristics(logicalCameraId)
+            if (logicalCharacteristics.get(CameraCharacteristics.LENS_FACING) != facing) {
+                continue
+            }
+            val physicalIds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                logicalCharacteristics.physicalCameraIds
+            } else {
+                emptySet()
+            }
+            val physicalCandidates = physicalIds.mapNotNull { physicalId ->
+                try {
+                    Triple(
+                        logicalCameraId,
+                        physicalId,
+                        cameraManager.getCameraCharacteristics(physicalId),
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            if (physicalCandidates.isNotEmpty()) {
+                candidates.addAll(physicalCandidates)
+            } else {
+                candidates.add(Triple(logicalCameraId, null, logicalCharacteristics))
+            }
+        }
+        return candidates
+    }
+
+    private fun referenceFocalLengthForZoom(focalLengths: List<Float>): Float {
+        if (focalLengths.isEmpty()) {
+            return 1f
+        }
+        return focalLengths
+            .filter { it >= 3.5f }
+            .minOrNull()
+            ?: focalLengths.maxOrNull()
+            ?: 1f
+    }
+
+    private fun cameraCharacteristicsForLens(
+        cameraManager: CameraManager,
+        lens: ZoomLens,
+    ): CameraCharacteristics? {
+        return try {
+            cameraManager.getCameraCharacteristics(lens.physicalCameraId ?: lens.logicalCameraId)
+        } catch (_: Exception) {
+            try {
+                cameraManager.getCameraCharacteristics(lens.logicalCameraId)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    private fun selectedZoomLens(): ZoomLens? {
+        val lenses = zoomLensesForFacing(lensFacing)
+        if (lenses.isEmpty()) {
+            return null
+        }
+        val selectedId = selectedLensId
+        return lenses.firstOrNull { it.selectionId == selectedId }
+            ?: lensForLogicalZoom(requestedZoomRatio, lenses)
+    }
+
+    private fun lensForLogicalZoom(
+        ratio: Float,
+        lenses: List<ZoomLens> = zoomLensesForFacing(lensFacing),
+    ): ZoomLens? {
+        if (lenses.isEmpty()) {
+            return null
+        }
+        return lenses
+            .filter { it.baseZoom <= ratio + 0.001f }
+            .maxByOrNull { it.baseZoom }
+            ?: lenses.first()
+    }
+
+    private fun logicalZoomRange(): Pair<Float, Float> {
+        val lenses = zoomLensesForFacing(lensFacing)
+        if (lenses.isEmpty()) {
+            val zoomState = camera?.cameraInfo?.zoomState?.value
+            return Pair(
+                zoomState?.minZoomRatio ?: 1f,
+                zoomState?.maxZoomRatio ?: 1f,
+            )
+        }
+        val minZoom = lenses.minOf { it.baseZoom.toDouble() }.toFloat()
+        val maxZoom = lenses
+            .maxOf { (it.baseZoom * it.maxDigitalZoom).toDouble() }
+            .toFloat()
+            .coerceAtLeast(minZoom)
+        return Pair(minZoom, maxZoom)
+    }
+
+    private fun applyLogicalZoom(ratio: Float) {
+        val range = logicalZoomRange()
+        requestedZoomRatio = ratio.coerceIn(range.first, range.second)
+        val nextLens = lensForLogicalZoom(requestedZoomRatio)
+        val nextLensId = nextLens?.selectionId
+        if (nextLensId != null && nextLensId != selectedLensId) {
+            selectedLensId = nextLensId
+            if (currentRecording != null) {
+                sealCurrentSegment(restartAfterFinalize = false) {
+                    mainHandler.post {
+                        bindUseCasesIfReady()
+                        sendCameraState()
+                    }
+                }
+            } else {
+                bindUseCasesIfReady()
+            }
+            return
+        }
+        applyPhysicalZoomForSelectedLens()
+        sendCameraState()
+    }
+
+    private fun applyPhysicalZoomForSelectedLens() {
+        val activeCamera = camera ?: return
+        val lens = selectedZoomLens()
+        val baseZoom = lens?.baseZoom ?: 1f
+        val zoomState = activeCamera.cameraInfo.zoomState.value
+        val minPhysicalZoom = zoomState?.minZoomRatio ?: 1f
+        val maxPhysicalZoom = zoomState?.maxZoomRatio
+            ?: lens?.maxDigitalZoom
+            ?: 1f
+        val physicalZoom = (requestedZoomRatio / baseZoom)
+            .coerceIn(minPhysicalZoom, maxPhysicalZoom)
+        activeCamera.cameraControl.setZoomRatio(physicalZoom)
+    }
+
+    private fun buildCameraSelector(targetLens: ZoomLens?): CameraSelector {
+        selectedLensId = targetLens?.selectionId
+        val builder = CameraSelector.Builder().requireLensFacing(lensFacing)
+        val targetLogicalCameraId = targetLens?.logicalCameraId
+        if (targetLogicalCameraId != null) {
+            builder.addCameraFilter { cameraInfos ->
+                val matching = cameraInfos.filter { cameraInfo ->
+                    Camera2CameraInfo.from(cameraInfo).cameraId == targetLogicalCameraId
+                }
+                matching.ifEmpty { cameraInfos }
+            }
+        }
+        return builder.build()
+    }
+
+    private fun <T> applyPhysicalCameraId(
+        builder: androidx.camera.core.ExtendableBuilder<T>,
+        lens: ZoomLens?,
+    ) {
+        val physicalCameraId = lens?.physicalCameraId ?: return
+        Camera2Interop.Extender(builder).setPhysicalCameraId(physicalCameraId)
     }
 
     /**
@@ -603,8 +886,11 @@ class NativeCapturePipeline(
             camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
             provider.unbindAll()
 
-            previewUseCase = Preview.Builder()
+            val targetLens = lensForLogicalZoom(requestedZoomRatio)
+            val previewBuilder = Preview.Builder()
                 .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+            applyPhysicalCameraId(previewBuilder, targetLens)
+            previewUseCase = previewBuilder
                 .build()
                 .also { preview ->
                     preview.setSurfaceProvider { request ->
@@ -621,9 +907,11 @@ class NativeCapturePipeline(
                     }
                 }
 
-            analysisUseCase = ImageAnalysis.Builder()
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setTargetAspectRatio(AspectRatio.RATIO_16_9)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            applyPhysicalCameraId(analysisBuilder, targetLens)
+            analysisUseCase = analysisBuilder
                 .build()
                 .also { analysis ->
                     analysis.setAnalyzer(analysisExecutor) { proxy ->
@@ -653,11 +941,10 @@ class NativeCapturePipeline(
             videoFrameRateRange()?.let { range ->
                 videoBuilder.setTargetFrameRate(range)
             }
+            applyPhysicalCameraId(videoBuilder, targetLens)
             videoCapture = videoBuilder.build()
 
-            val selector = CameraSelector.Builder()
-                .requireLensFacing(lensFacing)
-                .build()
+            val selector = buildCameraSelector(targetLens)
 
             camera = provider.bindToLifecycle(
                 activity,
@@ -667,6 +954,18 @@ class NativeCapturePipeline(
                 videoCapture,
             )
 
+            val boundLogicalCameraId = camera?.cameraInfo?.let { cameraInfo ->
+                Camera2CameraInfo.from(cameraInfo).cameraId
+            }
+            selectedLensId = if (
+                targetLens != null &&
+                    targetLens.logicalCameraId == boundLogicalCameraId
+            ) {
+                targetLens.selectionId
+            } else {
+                boundLogicalCameraId
+            }
+            applyPhysicalZoomForSelectedLens()
             camera?.cameraInfo?.zoomState?.observe(activity, zoomObserver)
             sendCameraState()
             if (bufferingEnabled && currentRecording == null) {
@@ -682,13 +981,13 @@ class NativeCapturePipeline(
 
     /**
      * Finer slices improve pre-roll resolution; coarser slices reduce muxer churn.
-     * Targets ~4–6 segments covering the full ring window.
+     * High-fps recording needs fewer stop/start rotations to avoid visible gaps.
      */
     private fun computeSegmentSliceMs(preRollMs: Long, postRollMs: Long): Long {
         val ringWindow = (preRollMs + postRollMs + 1500L).coerceAtLeast(3000L)
-        val divisor = if (isHighFpsRollingBuffer()) 6 else 5
-        val minSlice = if (isHighFpsRollingBuffer()) 400L else 600L
-        val maxSlice = if (isHighFpsRollingBuffer()) 2000L else 2800L
+        val divisor = if (isHighFpsRollingBuffer()) 3 else 5
+        val minSlice = if (isHighFpsRollingBuffer()) 1800L else 600L
+        val maxSlice = if (isHighFpsRollingBuffer()) 4500L else 2800L
         return (ringWindow / divisor).coerceIn(minSlice, maxSlice)
     }
 
@@ -1078,7 +1377,15 @@ class NativeCapturePipeline(
             val buffer = ByteBuffer.allocate(bufferSize)
             val bufferInfo = MediaCodec.BufferInfo()
 
-            for (segment in segments) {
+            var outputSegmentStartUs = 0L
+            for (segment in segments.sortedBy { it.startEpochMs }) {
+                val segmentClipStartUs =
+                    (maxOf(clipStartEpochMs, segment.startEpochMs) - segment.startEpochMs) * 1000L
+                val segmentClipEndUs =
+                    (minOf(clipEndEpochMs, segment.endEpochMs) - segment.startEpochMs) * 1000L
+                if (segmentClipEndUs <= segmentClipStartUs) {
+                    continue
+                }
                 muxInterleavedSegmentSamples(
                     segment = segment,
                     muxer = muxer,
@@ -1086,9 +1393,11 @@ class NativeCapturePipeline(
                     outputAudioTrack = outputAudioTrack,
                     clipStartEpochMs = clipStartEpochMs,
                     clipEndEpochMs = clipEndEpochMs,
+                    outputSegmentStartUs = outputSegmentStartUs,
                     buffer = buffer,
                     bufferInfo = bufferInfo,
                 )
+                outputSegmentStartUs += segmentClipEndUs - segmentClipStartUs
             }
         } finally {
             if (started) {
@@ -1109,13 +1418,14 @@ class NativeCapturePipeline(
         outputAudioTrack: Int,
         clipStartEpochMs: Long,
         clipEndEpochMs: Long,
+        outputSegmentStartUs: Long,
         buffer: ByteBuffer,
         bufferInfo: MediaCodec.BufferInfo,
     ) {
-        val clipStartUs = clipStartEpochMs * 1000L
-        val segmentStartUs = segment.startEpochMs * 1000L
-        val segmentClipStartUs = (clipStartUs - segmentStartUs).coerceAtLeast(0L)
-        val segmentClipEndUs = (clipEndEpochMs * 1000L - segmentStartUs).coerceAtLeast(0L)
+        val segmentClipStartUs =
+            (maxOf(clipStartEpochMs, segment.startEpochMs) - segment.startEpochMs) * 1000L
+        val segmentClipEndUs =
+            (minOf(clipEndEpochMs, segment.endEpochMs) - segment.startEpochMs) * 1000L
 
         val videoEx = MediaExtractor()
         val audioEx = MediaExtractor()
@@ -1192,7 +1502,8 @@ class NativeCapturePipeline(
                     if (useVideo) videoDone = true else audioDone = true
                     continue
                 }
-                bufferInfo.presentationTimeUs = segmentStartUs + sampleTimeUs - clipStartUs
+                bufferInfo.presentationTimeUs =
+                    outputSegmentStartUs + sampleTimeUs - segmentClipStartUs
                 bufferInfo.flags = ex.sampleFlags
                 muxer.writeSampleData(muxTrack, buffer, bufferInfo)
                 if (!ex.advance()) {
@@ -1264,14 +1575,15 @@ class NativeCapturePipeline(
     }
 
     private fun sendCameraState() {
-        val zoomState = camera?.cameraInfo?.zoomState?.value
+        val range = logicalZoomRange()
+        requestedZoomRatio = requestedZoomRatio.coerceIn(range.first, range.second)
         eventSink?.success(
             mapOf(
                 "type" to "camera_state",
                 "lensDirection" to lensDirectionLabel(),
-                "minZoom" to (zoomState?.minZoomRatio?.toDouble() ?: 1.0),
-                "maxZoom" to (zoomState?.maxZoomRatio?.toDouble() ?: 1.0),
-                "zoom" to (zoomState?.zoomRatio?.toDouble() ?: 1.0),
+                "minZoom" to range.first.toDouble(),
+                "maxZoom" to range.second.toDouble(),
+                "zoom" to requestedZoomRatio.toDouble(),
             ),
         )
     }

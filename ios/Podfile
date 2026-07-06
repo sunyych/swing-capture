@@ -40,5 +40,15 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # Xcode 26.5's Swift optimizer trips an ownership verifier failure while
+    # compiling HaishinKit 1.9.x. Keep the workaround scoped to that pod.
+    if target.name == 'HaishinKit'
+      target.build_configurations.each do |config|
+        if ['Profile', 'Release'].include?(config.name)
+          config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-Onone'
+        end
+      end
+    end
   end
 end

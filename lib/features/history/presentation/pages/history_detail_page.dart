@@ -157,14 +157,16 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   }) async {
     final current = _currentRecord;
     _tagUndoStack.add(current);
-    await ref.read(historyControllerProvider.notifier).updateRecordTagging(
-      record: current,
-      reviewState: reviewState,
-      userTag: userTag,
-      datasetState: CaptureDatasetState.labeled,
-      trainingState: TrainingLifecycleState.queued,
-    );
-    final refreshed = ref.read(historyControllerProvider).valueOrNull;
+    await ref
+        .read(historyControllerProvider.notifier)
+        .updateRecordTagging(
+          record: current,
+          reviewState: reviewState,
+          userTag: userTag,
+          datasetState: CaptureDatasetState.labeled,
+          trainingState: TrainingLifecycleState.queued,
+        );
+    final refreshed = ref.read(historyControllerProvider).value;
     if (refreshed != null) {
       _records
         ..clear()
@@ -176,7 +178,9 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   }
 
   Future<void> _promptCustomTag() async {
-    final controller = TextEditingController(text: _currentRecord.userTag ?? '');
+    final controller = TextEditingController(
+      text: _currentRecord.userTag ?? '',
+    );
     final tag = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -225,7 +229,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
     await ref
         .read(historyControllerProvider.notifier)
         .updateRecordTagging(record: previous);
-    final refreshed = ref.read(historyControllerProvider).valueOrNull;
+    final refreshed = ref.read(historyControllerProvider).value;
     if (refreshed != null) {
       _records
         ..clear()
@@ -334,13 +338,15 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
         _inferenceResult = result;
         _inferenceMessage = 'On-device inference completed.';
       });
-      await ref.read(historyControllerProvider.notifier).updateRecordTagging(
-        record: _currentRecord,
-        modelLabel: result.label,
-        modelConfidence: result.confidence,
-        trainingState: TrainingLifecycleState.queued,
-      );
-      final refreshed = ref.read(historyControllerProvider).valueOrNull;
+      await ref
+          .read(historyControllerProvider.notifier)
+          .updateRecordTagging(
+            record: _currentRecord,
+            modelLabel: result.label,
+            modelConfidence: result.confidence,
+            trainingState: TrainingLifecycleState.queued,
+          );
+      final refreshed = ref.read(historyControllerProvider).value;
       if (refreshed != null) {
         _records
           ..clear()

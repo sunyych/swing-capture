@@ -10,7 +10,7 @@ Future<void> main() async {
 
   runApp(
     ProviderScope(
-      overrides: bootstrap.overrides,
+      overrides: bootstrap.overrides.cast(),
       child: const MotionCaptureApp(),
     ),
   );

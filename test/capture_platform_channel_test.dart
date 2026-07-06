@@ -67,6 +67,23 @@ void main() {
   });
 
   group('NativeCaptureEvent.fromMap', () {
+    test('parses camera_state with fractional logical zoom', () {
+      final event = NativeCaptureEvent.fromMap({
+        'type': 'camera_state',
+        'lensDirection': 'back',
+        'minZoom': 0.5,
+        'maxZoom': 12.0,
+        'zoom': 0.75,
+      });
+
+      expect(event, isA<NativeCameraStateEvent>());
+      final camera = event as NativeCameraStateEvent;
+      expect(camera.lensDirection, 'back');
+      expect(camera.minZoom, 0.5);
+      expect(camera.maxZoom, 12.0);
+      expect(camera.zoom, 0.75);
+    });
+
     test('dispatches buffer_state to NativeBufferStateEvent', () {
       final event = NativeCaptureEvent.fromMap({
         'type': 'buffer_state',
@@ -116,6 +133,21 @@ void main() {
       expect(capability.summary, '120 fps back camera');
     });
 
+    test('preserves 240fps capability as the fastest recording mode', () {
+      final capability = NativeRecordingCapability.fromMap({
+        'maxFps': 240,
+        'supportedFps': [30, 60, 120, 240],
+        'source': 'camera2',
+      });
+
+      expect(capability.maxFps, 240);
+      expect(capability.recommendedFpsMode, VideoFpsMode.high240);
+      expect(
+        minimumHighSpeedVideoFpsMode(capability.recommendedFpsMode),
+        VideoFpsMode.high240,
+      );
+    });
+
     test('native recommended mode overrides max fps bucket', () {
       final capability = NativeRecordingCapability.fromMap({
         'maxFps': 240,
@@ -123,6 +155,42 @@ void main() {
       });
 
       expect(capability.recommendedFpsMode, VideoFpsMode.high120);
+    });
+
+    test('parses per-lens recording capabilities', () {
+      final capability = NativeRecordingCapability.fromMap({
+        'maxFps': 60,
+        'supportedFps': [30, 60],
+        'source': 'camera2',
+        'cameraLabel': 'across 2 lenses',
+        'lensCapabilities': [
+          {
+            'cameraLabel': 'back 1.0x lens',
+            'lensDirection': 'back',
+            'maxFps': 240,
+            'supportedFps': [30, 60, 120, 240],
+          },
+          {
+            'cameraLabel': 'back 3.0x lens',
+            'lensDirection': 'back',
+            'maxFps': 60,
+            'supportedFps': [30, 60],
+          },
+        ],
+      });
+
+      expect(capability.maxFps, 60);
+      expect(capability.recommendedFpsMode, VideoFpsMode.high60);
+      expect(capability.summary, '60 fps across 2 lenses');
+      expect(capability.lensCapabilities, hasLength(2));
+      expect(
+        capability.lensCapabilities.first.summary,
+        'back 1.0x lens 240 fps',
+      );
+      expect(
+        capability.lensSummary,
+        'back 1.0x lens 240 fps, back 3.0x lens 60 fps',
+      );
     });
   });
 }

@@ -209,17 +209,17 @@ class _SettingsView extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   DropdownButtonFormField<VideoFpsMode>(
-                    key: ValueKey(settings.videoFpsMode),
-                    initialValue: settings.videoFpsMode,
+                    key: ValueKey(
+                      minimumHighSpeedVideoFpsMode(settings.videoFpsMode),
+                    ),
+                    initialValue: minimumHighSpeedVideoFpsMode(
+                      settings.videoFpsMode,
+                    ),
                     decoration: const InputDecoration(
                       labelText: 'Target recording fps',
                       border: OutlineInputBorder(),
                     ),
                     items: const [
-                      DropdownMenuItem(
-                        value: VideoFpsMode.standard,
-                        child: Text('Standard (~30 fps)'),
-                      ),
                       DropdownMenuItem(
                         value: VideoFpsMode.high60,
                         child: Text('60 fps'),

@@ -15,11 +15,7 @@ class PoseJsonLogger {
     final out = <String, List<num>>{};
     for (final e in entries) {
       final p = e.value;
-      out[e.key.name] = [
-        _r4(p.x),
-        _r4(p.y),
-        _r2(p.confidence),
-      ];
+      out[e.key.name] = [_r4(p.x), _r4(p.y), _r2(p.confidence)];
     }
     return out;
   }
@@ -49,10 +45,10 @@ class PoseJsonLogger {
       'hasHitter': hasHitter,
       'gatherOk': gatherAllowsSwing,
       'detected': detected,
-      if (detectLabel != null) 'detectLabel': detectLabel,
-      if (detectScore != null) 'detectScore': _r2(detectScore),
-      if (detectReason != null) 'detectReason': detectReason,
-      if (stableMs != null) 'stableMs': stableMs,
+      'detectLabel': ?detectLabel,
+      'detectScore': ?(detectScore == null ? null : _r2(detectScore)),
+      'detectReason': ?detectReason,
+      'stableMs': ?stableMs,
       'lmCount': frame.landmarks.length,
       'lm': _landmarksMap(frame),
     });
