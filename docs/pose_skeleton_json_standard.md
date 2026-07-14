@@ -32,6 +32,7 @@
   "videoPath": "/.../swing_1745130000000000.mp4",
   "capturePipeline": "flutter_camera_buffer",
   "cameraFacing": "back",
+  "videoFps": 59.94,
   "normalization": "preview_normalized_xy",
   "landmarkSet": "swingcapture_13",
   "landmarkOrder": [
@@ -65,6 +66,8 @@
   - `back`
   - `external`
   - `unknown`
+- `videoFps`
+  - 最终保存视频文件的帧率；优先来自 container metadata，缺失时从 video sample timestamps 计算
 - `normalization`
   - 当前是预览坐标归一化，`x/y` 范围通常在 `[0, 1]`
 
@@ -107,6 +110,10 @@
   "complete": 0.8333,
   "hasPose": true,
   "lmCount": 13,
+  "poseSource": "yolo",
+  "candidateCount": 3,
+  "selectionScore": 0.9123,
+  "selectionReason": "center_target ...",
   "lm": {
     "leftShoulder": {
       "x": 0.5231,
@@ -125,6 +132,10 @@
 - `complete`: 这个 frame 的骨架完整度
 - `hasPose`: 当前帧是否存在有效骨架
 - `lmCount`: 当前帧 landmark 数
+- `poseSource`: 可选，当前被选中骨架的来源，例如 `mlKit`、`vision`、`yolo`
+- `candidateCount`: 可选，上游本帧提供的人体候选数量
+- `selectionScore`: 可选，目标人物选择器给当前候选的分数
+- `selectionReason`: 可选，目标人物选择器的可读诊断信息
 - `lm`: landmark 明细
 
 ## 建议的人工标注维度

@@ -1,20 +1,31 @@
 package com.lumiaiq.MotionCapture
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureFailure
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.Image
 import android.media.MediaMuxer
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.Range
+import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -55,13 +66,47 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+private const val ROLLING_BUFFER_TARGET_FPS = 120
+private const val ROLLING_BUFFER_FRAME_CAPACITY = 480
+private const val ROLLING_BUFFER_QUEUE_MS =
+    ROLLING_BUFFER_FRAME_CAPACITY * 1000L / ROLLING_BUFFER_TARGET_FPS
+private const val MIN_REQUIRED_HIGH_SPEED_EXPORT_FPS = 55.0
+private const val HIGH_SPEED_EXPORT_FPS_TOLERANCE = 0.90
+private const val ROLLING_BUFFER_LOG = "NativeRollingBuffer"
+private const val STARTUP_BUFFER_TEST_LOG = "StartupBufferTest"
+private const val HIGH_SPEED_SELF_TEST_LOG = "HighSpeedBufferSelfTest"
+private const val CAMERA_PIPELINE_SWITCH_DELAY_MS = 250L
+
+private class LoggingMethodResult(
+    private val tag: String,
+    private val operation: String,
+) : MethodChannel.Result {
+    override fun success(result: Any?) {
+        Log.i(tag, "$operation succeeded: $result")
+    }
+
+    override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+        Log.e(tag, "$operation failed code=$errorCode message=$errorMessage")
+    }
+
+    override fun notImplemented() {
+        Log.e(tag, "$operation not implemented")
+    }
+}
 
 private data class BufferedSegment(
     val path: String,
     val startEpochMs: Long,
     val endEpochMs: Long,
+    val targetFps: Int? = null,
 )
 
 private data class ZoomLens(
@@ -72,6 +117,33 @@ private data class ZoomLens(
 ) {
     val selectionId: String get() = physicalCameraId ?: logicalCameraId
 }
+
+private data class HighSpeedRecordingConfig(
+    val cameraId: String,
+    val fpsRange: Range<Int>,
+    val targetFps: Int,
+    val size: Size,
+    val orientationHintDegrees: Int,
+    val constrainedHighSpeed: Boolean,
+) {
+    val failureKey: String
+        get() = "$cameraId:${size.width}x${size.height}:$targetFps:" +
+            "${if (constrainedHighSpeed) "hfr" else "native"}:${fpsRange.lower}-${fpsRange.upper}"
+}
+
+private data class StartupEncoderDrainState(
+    var trackIndex: Int = -1,
+    var muxerStarted: Boolean = false,
+    var frameCount: Int = 0,
+    var firstPtsUs: Long = -1L,
+    var lastPtsUs: Long = -1L,
+)
+
+private data class DebugVideoStats(
+    val frameCount: Int,
+    val durationMs: Long,
+    val achievedFps: Double?,
+)
 
 class NativeCapturePipeline(
     private val activity: FlutterActivity,
@@ -92,12 +164,27 @@ class NativeCapturePipeline(
             .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
             .build(),
     )
+    private val poseFrameIntervalMs = 50L
+    private val maxPreviewPoseBitmapWidth = 640
+    private val maxHighSpeedPreviewPoseBitmapWidth = 384
+    private val highSpeedPoseSamplingRunnable = Runnable {
+        sampleHighSpeedPreviewPoseFrame()
+        scheduleHighSpeedPoseSamplingIfNeeded()
+    }
+    private val androidHighSpeedCaptureEngine = AndroidHighSpeedCaptureEngine(activity)
 
     private var eventSink: EventChannel.EventSink? = null
     private var previewView: TextureView? = null
     private var previewRequested = false
     private var detectionEnabled = false
     private var isProcessingPose = false
+    private var lastPoseAnalysisStartedMs = 0L
+    @Volatile
+    private var debugSelfTestActive = false
+    @Volatile
+    private var debugSelfTestPoseAttempts = 0
+    @Volatile
+    private var debugSelfTestPoseResults = 0
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var selectedLensId: String? = null
     private var requestedZoomRatio = 1f
@@ -108,21 +195,40 @@ class NativeCapturePipeline(
     private var analysisUseCase: ImageAnalysis? = null
     private var recorder: Recorder? = null
     private var videoCapture: VideoCapture<Recorder>? = null
+    private var highSpeedCameraDevice: CameraDevice? = null
+    private var highSpeedSession: CameraConstrainedHighSpeedCaptureSession? = null
+    private var nativeVideoSession: CameraCaptureSession? = null
+    private var highSpeedRecorder: MediaRecorder? = null
+    private var highSpeedPreviewSurface: Surface? = null
+    private var highSpeedSegmentStarting = false
+    private var currentHighSpeedSegmentActive = false
+    private var highSpeedStopRequestedWhileStarting = false
+    private var highSpeedCaptureFailureReported = false
+    private var highSpeedFallbackActive = false
+    private var activeHighSpeedTargetFps: Int? = null
+    private var activeHighSpeedSize: Size? = null
+    private var activeHighSpeedCameraId: String? = null
+    private var activeHighSpeedConfigKey: String? = null
+    private var startupBufferTestActive = false
+    private var dedicatedHighSpeedStartPending = false
+    private val failedHighSpeedConfigKeys = mutableSetOf<String>()
 
     private var bufferingEnabled = false
-    private var preRollMs = 2000L
-    private var postRollMs = 2000L
+    private var preRollMs = ROLLING_BUFFER_QUEUE_MS
+    private var postRollMs = 0L
     /**
-     * Wire value from Dart [VideoFpsMode] (`standard`, `fps120`, `fps240`, `maxSupported`).
+     * Wire value from Dart [VideoFpsMode] (`standard`, `fps60`, `fps120`, `fps240`, `maxSupported`).
      * Legacy `VideoFpsPreference` enum names are still accepted for rebinds.
      */
     private var videoFpsMode: String = "fps60"
     private var lastAchievedFps: Double? = null
+    private var lastLoggedBufferStateKey: String? = null
     /** Wall-clock slice length for each rolling file; recomputed when buffering arms. */
     private var segmentDurationMs = 1000L
 
     private val mergeExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val clipRtmpExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val startupTestExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private var rtmpLive: RtmpLiveBroadcaster? = null
     private val swingClipPublisher = SwingClipRtmpPublisher(activity, clipRtmpExecutor)
@@ -141,6 +247,7 @@ class NativeCapturePipeline(
 
     fun attachEventSink(sink: EventChannel.EventSink?) {
         eventSink = sink
+        androidHighSpeedCaptureEngine.attachEventSink(sink)
     }
 
     fun createPreviewFactory(): PlatformViewFactory {
@@ -148,6 +255,27 @@ class NativeCapturePipeline(
     }
 
     fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        if (isDedicatedHighSpeedMethod(call.method)) {
+            if (call.method == "startCapture" || call.method == "startBuffering") {
+                dedicatedHighSpeedStartPending = true
+                releaseLegacyCameraForDedicatedHighSpeed()
+                mainHandler.postDelayed(
+                    {
+                        dedicatedHighSpeedStartPending = false
+                        if (androidHighSpeedCaptureEngine.handleMethodCall(call, result)) {
+                            scheduleHighSpeedPoseSamplingIfNeeded()
+                        } else {
+                            result.notImplemented()
+                        }
+                    },
+                    CAMERA_PIPELINE_SWITCH_DELAY_MS,
+                )
+                return
+            }
+            if (androidHighSpeedCaptureEngine.handleMethodCall(call, result)) {
+                return
+            }
+        }
         when (call.method) {
             "startPreview" -> {
                 previewRequested = true
@@ -164,40 +292,47 @@ class NativeCapturePipeline(
             }
             "startDetection" -> {
                 detectionEnabled = true
+                scheduleHighSpeedPoseSamplingIfNeeded()
                 result.success(null)
             }
             "stopDetection" -> {
                 detectionEnabled = false
+                mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
                 result.success(null)
             }
             "startBuffering" -> {
                 val args = call.arguments as? Map<*, *>
-                val requestedPreRollMs = (args?.get("preRollMs") as? Number)?.toLong()
-                val requestedPostRollMs = (args?.get("postRollMs") as? Number)?.toLong()
-                if (requestedPreRollMs != null) {
-                    preRollMs = requestedPreRollMs.coerceAtLeast(0L)
-                }
-                if (requestedPostRollMs != null) {
-                    postRollMs = requestedPostRollMs.coerceAtLeast(0L)
-                }
+                preRollMs = ROLLING_BUFFER_QUEUE_MS
+                postRollMs = 0L
                 val requestedFpsMode =
                     args?.get("videoFpsMode") as? String
                         ?: args?.get("videoFpsPreference") as? String
                 val newMode = requestedFpsMode ?: videoFpsMode
                 val modeChanged = newMode != videoFpsMode
                 videoFpsMode = newMode
+                if (modeChanged || videoFpsMode != "standard") {
+                    failedHighSpeedConfigKeys.clear()
+                    highSpeedFallbackActive = false
+                }
+                Log.i(
+                    ROLLING_BUFFER_LOG,
+                    "startBuffering mode=$videoFpsMode modeChanged=$modeChanged",
+                )
 
                 bufferingEnabled = true
                 segmentDurationMs = computeSegmentSliceMs(preRollMs, postRollMs)
 
                 val canRebuild =
-                    modeChanged &&
-                        previewRequested &&
-                        cameraProvider != null &&
-                        previewView != null
+                    previewRequested &&
+                        previewView != null &&
+                        (
+                            isHighFpsRollingBuffer() ||
+                                modeChanged ||
+                                analysisUseCase != null
+                            )
 
                 if (canRebuild) {
-                    if (currentRecording != null) {
+                    if (hasActiveOrStartingSegment()) {
                         sealCurrentSegment(restartAfterFinalize = false) {
                             mainHandler.post {
                                 bindUseCasesIfReady()
@@ -224,28 +359,35 @@ class NativeCapturePipeline(
                 val args = call.arguments as? Map<*, *>
                 val outputPath = args?.get("outputPath") as? String
                 val triggerEpochMs = (args?.get("triggerEpochMs") as? Number)?.toLong()
-                val requestedPreRollMs = (args?.get("preRollMs") as? Number)?.toLong()
-                val requestedPostRollMs = (args?.get("postRollMs") as? Number)?.toLong()
                 if (
                     outputPath == null ||
-                        triggerEpochMs == null ||
-                        requestedPreRollMs == null ||
-                        requestedPostRollMs == null
+                        triggerEpochMs == null
                 ) {
                     result.error(
                         "invalid_args",
-                        "saveBufferedClip requires outputPath/triggerEpochMs/preRollMs/postRollMs",
-                        null,
+                        "saveBufferedClip requires outputPath/triggerEpochMs",
+                        null
                     )
                     return
                 }
-                preRollMs = requestedPreRollMs.coerceAtLeast(0L)
-                postRollMs = requestedPostRollMs.coerceAtLeast(0L)
+                preRollMs = ROLLING_BUFFER_QUEUE_MS
+                postRollMs = 0L
                 saveBufferedClip(
                     outputPath = outputPath,
                     triggerEpochMs = triggerEpochMs,
                     result = result,
                 )
+            }
+            "runStartupBufferTest" -> {
+                val args = call.arguments as? Map<*, *>
+                val durationMs = ((args?.get("durationMs") as? Number)?.toInt()
+                    ?: ROLLING_BUFFER_QUEUE_MS.toInt())
+                    .coerceIn(1000, 10_000)
+                val requestedFpsMode = args?.get("videoFpsMode") as? String
+                if (!requestedFpsMode.isNullOrBlank()) {
+                    videoFpsMode = requestedFpsMode
+                }
+                runStartupBufferTest(durationMs, result)
             }
             "switchCamera" -> {
                 lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -255,7 +397,15 @@ class NativeCapturePipeline(
                 }
                 selectedLensId = null
                 requestedZoomRatio = 1f
-                bindUseCasesIfReady()
+                failedHighSpeedConfigKeys.clear()
+                highSpeedFallbackActive = false
+                if (hasActiveOrStartingSegment()) {
+                    sealCurrentSegment(restartAfterFinalize = false) {
+                        mainHandler.post { bindUseCasesIfReady() }
+                    }
+                } else {
+                    bindUseCasesIfReady()
+                }
                 result.success(mapOf("lensDirection" to lensDirectionLabel()))
             }
             "setZoomRatio" -> {
@@ -400,7 +550,181 @@ class NativeCapturePipeline(
         }
     }
 
+    fun runDebugHighSpeedBufferSelfTest() {
+        if (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            Log.w(HIGH_SPEED_SELF_TEST_LOG, "Ignored outside a debug build.")
+            return
+        }
+        val startEpochMs = System.currentTimeMillis()
+        val requirePose = detectionEnabled
+        debugSelfTestActive = true
+        debugSelfTestPoseAttempts = 0
+        debugSelfTestPoseResults = 0
+        Log.i(HIGH_SPEED_SELF_TEST_LOG, "Starting 4-second encoded rolling-buffer test.")
+        handleMethodCall(
+            MethodCall(
+                "startBuffering",
+                mapOf(
+                    "preRollMs" to 4000L,
+                    "postRollMs" to 0L,
+                    "sensitivity" to 0.55,
+                    "debug" to true,
+                ),
+            ),
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    Log.i(HIGH_SPEED_SELF_TEST_LOG, "Capture started: $result")
+                    val targetFps =
+                        ((result as? Map<*, *>)?.get("fps") as? Number)?.toInt() ?: 0
+                    mainHandler.postDelayed(
+                        {
+                            val outputFile = File(
+                                activity.filesDir,
+                                "high_speed_clips/selftest_$startEpochMs.mp4",
+                            )
+                            handleMethodCall(
+                                MethodCall(
+                                    "saveBufferedClip",
+                                    mapOf(
+                                        "outputPath" to outputFile.absolutePath,
+                                        "triggerEpochMs" to System.currentTimeMillis(),
+                                        "preRollMs" to 4000L,
+                                        "postRollMs" to 0L,
+                                    ),
+                                ),
+                                object : MethodChannel.Result {
+                                    override fun success(result: Any?) {
+                                        startupTestExecutor.execute {
+                                            val stats = inspectDebugVideo(outputFile)
+                                            val minimumFps = targetFps * 0.90
+                                            val passed =
+                                                stats != null &&
+                                                    stats.durationMs >= 3800L &&
+                                                    stats.frameCount > 0 &&
+                                                    (stats.achievedFps ?: 0.0) >= minimumFps &&
+                                                    outputFile.length() > 0L &&
+                                                    (!requirePose ||
+                                                        debugSelfTestPoseResults > 0)
+                                            Log.i(
+                                                HIGH_SPEED_SELF_TEST_LOG,
+                                                "${if (passed) "PASS" else "FAIL"} " +
+                                                    "path=$result targetFps=$targetFps " +
+                                                    "frames=${stats?.frameCount} " +
+                                                    "durationMs=${stats?.durationMs} " +
+                                                    "fps=${stats?.achievedFps} " +
+                                                    "bytes=${outputFile.length()} " +
+                                                    "poseAttempts=$debugSelfTestPoseAttempts " +
+                                                    "poseResults=$debugSelfTestPoseResults " +
+                                                    "captureStillRunning=" +
+                                                    androidHighSpeedCaptureEngine
+                                                        .isRunningOrStarting,
+                                            )
+                                            stopDebugHighSpeedBufferTest()
+                                        }
+                                    }
+
+                                    override fun error(
+                                        errorCode: String,
+                                        errorMessage: String?,
+                                        errorDetails: Any?,
+                                    ) {
+                                        Log.e(
+                                            HIGH_SPEED_SELF_TEST_LOG,
+                                            "FAIL save code=$errorCode message=$errorMessage",
+                                        )
+                                        stopDebugHighSpeedBufferTest()
+                                    }
+
+                                    override fun notImplemented() {
+                                        Log.e(HIGH_SPEED_SELF_TEST_LOG, "FAIL save not implemented")
+                                    }
+                                },
+                            )
+                        },
+                        5200L,
+                    )
+                }
+
+                override fun error(
+                    errorCode: String,
+                    errorMessage: String?,
+                    errorDetails: Any?,
+                ) {
+                    Log.e(
+                        HIGH_SPEED_SELF_TEST_LOG,
+                        "FAIL start code=$errorCode message=$errorMessage",
+                    )
+                }
+
+                override fun notImplemented() {
+                    Log.e(HIGH_SPEED_SELF_TEST_LOG, "FAIL start not implemented")
+                }
+            },
+        )
+    }
+
+    private fun stopDebugHighSpeedBufferTest() {
+        debugSelfTestActive = false
+        mainHandler.postDelayed(
+            {
+                androidHighSpeedCaptureEngine.handleMethodCall(
+                    MethodCall("stopBuffering", null),
+                    LoggingMethodResult(HIGH_SPEED_SELF_TEST_LOG, "stop"),
+                )
+            },
+            500L,
+        )
+    }
+
+    private fun inspectDebugVideo(file: File): DebugVideoStats? {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(file.absolutePath)
+            val videoTrack = (0 until extractor.trackCount).firstOrNull { index ->
+                extractor.getTrackFormat(index)
+                    .getString(MediaFormat.KEY_MIME)
+                    ?.startsWith("video/") == true
+            } ?: return null
+            extractor.selectTrack(videoTrack)
+            var frameCount = 0
+            var firstPtsUs = -1L
+            var lastPtsUs = -1L
+            while (true) {
+                val ptsUs = extractor.sampleTime
+                if (ptsUs < 0L) {
+                    break
+                }
+                if (firstPtsUs < 0L) {
+                    firstPtsUs = ptsUs
+                }
+                lastPtsUs = ptsUs
+                frameCount += 1
+                if (!extractor.advance()) {
+                    break
+                }
+            }
+            if (frameCount <= 0 || firstPtsUs < 0L || lastPtsUs < firstPtsUs) {
+                return null
+            }
+            val durationMs = (lastPtsUs - firstPtsUs) / 1000L
+            return DebugVideoStats(
+                frameCount = frameCount,
+                durationMs = durationMs,
+                achievedFps = if (frameCount > 1 && durationMs > 0L) {
+                    (frameCount - 1) * 1000.0 / durationMs.toDouble()
+                } else {
+                    null
+                },
+            )
+        } catch (_: Exception) {
+            return null
+        } finally {
+            extractor.release()
+        }
+    }
+
     fun attachPreviewView(view: TextureView) {
+        androidHighSpeedCaptureEngine.attachPreviewView(view)
         previewView = view.apply {
             isOpaque = true
             surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -434,6 +758,7 @@ class NativeCapturePipeline(
     }
 
     fun detachPreviewView(view: TextureView) {
+        androidHighSpeedCaptureEngine.detachPreviewView(view)
         if (previewView === view) {
             previewView = null
         }
@@ -442,10 +767,12 @@ class NativeCapturePipeline(
     fun dispose() {
         rtmpLive?.stop()
         rtmpLive = null
+        androidHighSpeedCaptureEngine.dispose()
         stopBuffering(discardSegments = true)
         previewRequested = false
         detectionEnabled = false
         isProcessingPose = false
+        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
         eventSink = null
         previewView = null
         camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
@@ -454,13 +781,16 @@ class NativeCapturePipeline(
         analysisExecutor.shutdown()
         mergeExecutor.shutdown()
         clipRtmpExecutor.shutdown()
+        startupTestExecutor.shutdown()
     }
 
     private fun stopPreview() {
+        androidHighSpeedCaptureEngine.stopCaptureForLegacyRebind()
         rtmpLive?.stop()
         rtmpLive = null
         previewRequested = false
         stopBuffering(discardSegments = true)
+        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
         camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
         cameraProvider?.unbindAll()
         previewUseCase = null
@@ -492,7 +822,13 @@ class NativeCapturePipeline(
     }
 
     private fun isHighFpsRollingBuffer(): Boolean {
-        return videoFpsMode != "standard"
+        return bufferingEnabled && videoFpsMode != "standard" && !highSpeedFallbackActive
+    }
+
+    private fun hasActiveOrStartingSegment(): Boolean {
+        return currentRecording != null ||
+            currentHighSpeedSegmentActive ||
+            highSpeedSegmentStarting
     }
 
     private fun nominalTargetFpsForPreference(): Int {
@@ -582,11 +918,6 @@ class NativeCapturePipeline(
         characteristics: CameraCharacteristics,
     ): List<Int> {
         val supportedFps = mutableSetOf(30)
-        characteristics
-            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            ?.forEach { range ->
-                supportedFps.add(range.upper)
-            }
         characteristics
             .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             ?.highSpeedVideoFpsRanges
@@ -799,7 +1130,9 @@ class NativeCapturePipeline(
         val nextLensId = nextLens?.selectionId
         if (nextLensId != null && nextLensId != selectedLensId) {
             selectedLensId = nextLensId
-            if (currentRecording != null) {
+            failedHighSpeedConfigKeys.clear()
+            highSpeedFallbackActive = false
+            if (hasActiveOrStartingSegment()) {
                 sealCurrentSegment(restartAfterFinalize = false) {
                     mainHandler.post {
                         bindUseCasesIfReady()
@@ -856,6 +1189,9 @@ class NativeCapturePipeline(
      * Requested fps [Range] for [VideoCapture]. Null keeps CameraX / device defaults (~30).
      */
     private fun videoFrameRateRange(): Range<Int>? {
+        if (highSpeedFallbackActive) {
+            return null
+        }
         return when (videoFpsMode) {
             "standard" -> null
             "fps60" -> Range(60, 60)
@@ -873,14 +1209,29 @@ class NativeCapturePipeline(
     }
 
     private fun bindUseCasesIfReady() {
+        if (
+            dedicatedHighSpeedStartPending ||
+            androidHighSpeedCaptureEngine.isRunningOrStarting
+        ) {
+            return
+        }
         if (rtmpLive != null) {
             return
         }
-        val provider = cameraProvider ?: return
+        if (startupBufferTestActive) {
+            return
+        }
         val view = previewView ?: return
         if (!previewRequested) {
             return
         }
+        if (bufferingEnabled && isHighFpsRollingBuffer()) {
+            startHighSpeedBufferingIfReady(view)
+            return
+        }
+
+        releaseHighSpeedResources()
+        val provider = cameraProvider ?: return
 
         try {
             camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
@@ -907,17 +1258,22 @@ class NativeCapturePipeline(
                     }
                 }
 
-            val analysisBuilder = ImageAnalysis.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_16_9)
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            applyPhysicalCameraId(analysisBuilder, targetLens)
-            analysisUseCase = analysisBuilder
-                .build()
-                .also { analysis ->
-                    analysis.setAnalyzer(analysisExecutor) { proxy ->
-                        analyzeFrame(proxy)
+            val bindAnalysis = !(bufferingEnabled && isHighFpsRollingBuffer())
+            analysisUseCase = if (bindAnalysis) {
+                val analysisBuilder = ImageAnalysis.Builder()
+                    .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                applyPhysicalCameraId(analysisBuilder, targetLens)
+                analysisBuilder
+                    .build()
+                    .also { analysis ->
+                        analysis.setAnalyzer(analysisExecutor) { proxy ->
+                            analyzeFrame(proxy)
+                        }
                     }
-                }
+            } else {
+                null
+            }
 
             val qualitySelector = if (videoFpsMode == "maxSupported") {
                 QualitySelector.from(
@@ -946,13 +1302,23 @@ class NativeCapturePipeline(
 
             val selector = buildCameraSelector(targetLens)
 
-            camera = provider.bindToLifecycle(
-                activity,
-                selector,
-                previewUseCase,
-                analysisUseCase,
-                videoCapture,
-            )
+            val analysis = analysisUseCase
+            camera = if (analysis != null) {
+                provider.bindToLifecycle(
+                    activity,
+                    selector,
+                    previewUseCase,
+                    analysis,
+                    videoCapture,
+                )
+            } else {
+                provider.bindToLifecycle(
+                    activity,
+                    selector,
+                    previewUseCase,
+                    videoCapture,
+                )
+            }
 
             val boundLogicalCameraId = camera?.cameraInfo?.let { cameraInfo ->
                 Camera2CameraInfo.from(cameraInfo).cameraId
@@ -968,7 +1334,7 @@ class NativeCapturePipeline(
             applyPhysicalZoomForSelectedLens()
             camera?.cameraInfo?.zoomState?.observe(activity, zoomObserver)
             sendCameraState()
-            if (bufferingEnabled && currentRecording == null) {
+            if (bufferingEnabled && !hasActiveOrStartingSegment()) {
                 startNewSegment()
             }
         } catch (error: Exception) {
@@ -979,22 +1345,62 @@ class NativeCapturePipeline(
         }
     }
 
+    private fun isDedicatedHighSpeedMethod(method: String): Boolean {
+        return method == "getCapabilities" ||
+            method == "startCapture" ||
+            method == "stopCapture" ||
+            method == "startBuffering" ||
+            method == "stopBuffering" ||
+            method == "saveBufferedClip" ||
+            method == "setSensitivity" ||
+            method == "getSavedClips"
+    }
+
+    private fun releaseLegacyCameraForDedicatedHighSpeed() {
+        bufferingEnabled = false
+        previewRequested = true
+        mainHandler.removeCallbacks(segmentRotationRunnable)
+        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
+        rtmpLive?.stop()
+        rtmpLive = null
+        try {
+            currentRecording?.stop()
+        } catch (_: Exception) {
+        }
+        currentRecording = null
+        currentSegmentPath = null
+        currentSegmentFinalizeCallback = null
+        currentSegmentRestartAfterFinalize = false
+        releaseHighSpeedResources()
+        camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
+        try {
+            cameraProvider?.unbindAll()
+        } catch (_: Exception) {
+        }
+        camera = null
+        previewUseCase = null
+        analysisUseCase = null
+        videoCapture = null
+        recorder = null
+        isProcessingPose = false
+    }
+
     /**
      * Finer slices improve pre-roll resolution; coarser slices reduce muxer churn.
-     * High-fps recording needs fewer stop/start rotations to avoid visible gaps.
+     * Stopping a recording can still make the preview surface idle on some devices,
+     * so all rolling-buffer slices need to be long enough to avoid periodic stutter.
      */
     private fun computeSegmentSliceMs(preRollMs: Long, postRollMs: Long): Long {
         val ringWindow = (preRollMs + postRollMs + 1500L).coerceAtLeast(3000L)
-        val divisor = if (isHighFpsRollingBuffer()) 3 else 5
-        val minSlice = if (isHighFpsRollingBuffer()) 1800L else 600L
-        val maxSlice = if (isHighFpsRollingBuffer()) 4500L else 2800L
-        return (ringWindow / divisor).coerceIn(minSlice, maxSlice)
+        val minSlice = if (isHighFpsRollingBuffer()) 120_000L else 90_000L
+        val maxSlice = if (isHighFpsRollingBuffer()) 180_000L else 120_000L
+        return (ringWindow + minSlice).coerceIn(minSlice, maxSlice)
     }
 
     private fun stopBuffering(discardSegments: Boolean) {
         bufferingEnabled = false
         mainHandler.removeCallbacks(segmentRotationRunnable)
-        if (currentRecording != null) {
+        if (hasActiveOrStartingSegment()) {
             sealCurrentSegment(
                 restartAfterFinalize = false,
                 callback = {
@@ -1002,6 +1408,7 @@ class NativeCapturePipeline(
                         clearCompletedSegments()
                     }
                     sendBufferState()
+                    restoreAnalysisUseCaseIfNeeded()
                 },
             )
             return
@@ -1010,10 +1417,27 @@ class NativeCapturePipeline(
             clearCompletedSegments()
         }
         sendBufferState()
+        restoreAnalysisUseCaseIfNeeded()
+    }
+
+    private fun restoreAnalysisUseCaseIfNeeded() {
+        if (
+            previewRequested &&
+                detectionEnabled &&
+                rtmpLive == null &&
+                !hasActiveOrStartingSegment() &&
+                analysisUseCase == null
+        ) {
+            bindUseCasesIfReady()
+        }
     }
 
     private fun startNewSegment() {
-        if (!bufferingEnabled || currentRecording != null) {
+        if (!bufferingEnabled || hasActiveOrStartingSegment()) {
+            return
+        }
+        if (isHighFpsRollingBuffer()) {
+            startNewHighSpeedSegment()
             return
         }
         val capture = videoCapture ?: return
@@ -1051,6 +1475,21 @@ class NativeCapturePipeline(
         restartAfterFinalize: Boolean,
         callback: ((BufferedSegment?) -> Unit)?,
     ) {
+        if (highSpeedSegmentStarting && !currentHighSpeedSegmentActive) {
+            currentSegmentRestartAfterFinalize = restartAfterFinalize
+            currentSegmentFinalizeCallback = callback
+            highSpeedStopRequestedWhileStarting = true
+            mainHandler.removeCallbacks(segmentRotationRunnable)
+            return
+        }
+        if (currentHighSpeedSegmentActive || highSpeedRecorder != null) {
+            stopHighSpeedSegment(
+                restartAfterFinalize = restartAfterFinalize,
+                callback = callback,
+            )
+            return
+        }
+
         val recording = currentRecording
         if (recording == null) {
             callback?.invoke(null)
@@ -1104,9 +1543,919 @@ class NativeCapturePipeline(
         sendBufferState()
     }
 
+    private fun startHighSpeedBufferingIfReady(view: TextureView) {
+        camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
+        cameraProvider?.unbindAll()
+        camera = null
+        previewUseCase = null
+        analysisUseCase = null
+        videoCapture = null
+        recorder = null
+
+        if (!hasActiveOrStartingSegment()) {
+            if (view.surfaceTexture == null) {
+                return
+            }
+            startNewSegment()
+        }
+        sendCameraState()
+        sendBufferState()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startNewHighSpeedSegment() {
+        val view = previewView ?: return
+        val texture = view.surfaceTexture ?: return
+        if (
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            sendError("camera_permission_missing", "Camera permission is required.")
+            return
+        }
+
+        val config = selectHighSpeedRecordingConfig()
+        if (config == null) {
+            failRequiredHighSpeedBuffer(
+                code = "high_speed_required_unavailable",
+                message = "High-speed rolling buffer is unavailable on this lens.",
+            )
+            return
+        }
+        Log.i(
+            ROLLING_BUFFER_LOG,
+            "Starting high-speed segment camera=${config.cameraId} " +
+                "fps=${config.fpsRange} size=${config.size} " +
+                "mode=${if (config.constrainedHighSpeed) "hfr" else "native"}",
+        )
+
+        val outputFile = File(
+            clipsDirectory,
+            "segment_${System.currentTimeMillis()}.mp4",
+        )
+        activeHighSpeedTargetFps = config.targetFps
+        activeHighSpeedSize = config.size
+        activeHighSpeedCameraId = config.cameraId
+        activeHighSpeedConfigKey = config.failureKey
+        highSpeedSegmentStarting = true
+        currentHighSpeedSegmentActive = false
+        highSpeedStopRequestedWhileStarting = false
+        highSpeedCaptureFailureReported = false
+        sendBufferState()
+
+        try {
+            cameraProvider?.unbindAll()
+            val mediaRecorder = prepareHighSpeedMediaRecorder(config, outputFile)
+            texture.setDefaultBufferSize(config.size.width, config.size.height)
+            val previewSurface = Surface(texture)
+
+            highSpeedRecorder = mediaRecorder
+            highSpeedPreviewSurface = previewSurface
+            currentSegmentPath = outputFile.absolutePath
+            currentSegmentStartEpochMs = 0L
+
+            val cameraManager =
+                activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            cameraManager.openCamera(
+                config.cameraId,
+                object : CameraDevice.StateCallback() {
+                    override fun onOpened(device: CameraDevice) {
+                        highSpeedCameraDevice = device
+                        configureHighSpeedSession(
+                            device = device,
+                            config = config,
+                            previewSurface = previewSurface,
+                            recorderSurface = mediaRecorder.surface,
+                        )
+                    }
+
+                    override fun onDisconnected(device: CameraDevice) {
+                        device.close()
+                        failHighSpeedSegment(
+                            code = "high_speed_camera_disconnected",
+                            message = "High-speed camera disconnected.",
+                        )
+                    }
+
+                    override fun onError(device: CameraDevice, error: Int) {
+                        device.close()
+                        failHighSpeedSegment(
+                            code = "high_speed_camera_error",
+                            message = "High-speed camera open failed: $error",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            outputFile.delete()
+            failHighSpeedSegment(
+                code = "high_speed_start_failed",
+                message = error.message ?: "Unable to start high-speed recording.",
+            )
+        }
+    }
+
+    private fun configureHighSpeedSession(
+        device: CameraDevice,
+        config: HighSpeedRecordingConfig,
+        previewSurface: Surface,
+        recorderSurface: Surface,
+    ) {
+        if (!config.constrainedHighSpeed) {
+            configureNativeVideoSession(
+                device = device,
+                config = config,
+                previewSurface = previewSurface,
+                recorderSurface = recorderSurface,
+            )
+            return
+        }
+        try {
+            device.createConstrainedHighSpeedCaptureSession(
+                listOf(previewSurface, recorderSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        val highSpeed = session as? CameraConstrainedHighSpeedCaptureSession
+                        if (highSpeed == null) {
+                            failHighSpeedSegment(
+                                code = "high_speed_session_failed",
+                                message = "Camera did not create a constrained high-speed session.",
+                            )
+                            return
+                        }
+                        highSpeedSession = highSpeed
+                        try {
+                            val requestBuilder =
+                                device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                            requestBuilder.addTarget(previewSurface)
+                            requestBuilder.addTarget(recorderSurface)
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_MODE,
+                                CaptureRequest.CONTROL_MODE_AUTO,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_CAPTURE_INTENT,
+                                CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_MODE,
+                                CaptureRequest.CONTROL_AE_MODE_ON,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                config.fpsRange,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AF_MODE,
+                                CaptureRequest.CONTROL_AF_MODE_OFF,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+                            )
+                            val requests = highSpeed.createHighSpeedRequestList(
+                                requestBuilder.build(),
+                            )
+                            highSpeed.setRepeatingBurst(
+                                requests,
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureFailed(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        failure: CaptureFailure,
+                                    ) {
+                                        reportHighSpeedCaptureFailure(
+                                            message =
+                                                "High-speed camera capture failed: " +
+                                                    "reason=${failure.reason}, " +
+                                                    "frame=${failure.frameNumber}, " +
+                                                    "captured=${failure.wasImageCaptured()}.",
+                                        )
+                                    }
+
+                                    override fun onCaptureSequenceAborted(
+                                        session: CameraCaptureSession,
+                                        sequenceId: Int,
+                                    ) {
+                                        reportHighSpeedCaptureFailure(
+                                            message = "High-speed camera capture was aborted.",
+                                        )
+                                    }
+                                },
+                                mainHandler,
+                            )
+                            highSpeedRecorder?.start()
+                            currentSegmentStartEpochMs = System.currentTimeMillis()
+                            highSpeedSegmentStarting = false
+                            currentHighSpeedSegmentActive = true
+                            scheduleHighSpeedPoseSamplingIfNeeded()
+
+                            if (highSpeedStopRequestedWhileStarting) {
+                                val restart = currentSegmentRestartAfterFinalize
+                                val callback = currentSegmentFinalizeCallback
+                                currentSegmentRestartAfterFinalize = false
+                                currentSegmentFinalizeCallback = null
+                                highSpeedStopRequestedWhileStarting = false
+                                stopHighSpeedSegment(
+                                    restartAfterFinalize = restart,
+                                    callback = callback,
+                                )
+                                return
+                            }
+
+                            mainHandler.removeCallbacks(segmentRotationRunnable)
+                            mainHandler.postDelayed(
+                                segmentRotationRunnable,
+                                segmentDurationMs,
+                            )
+                            sendBufferState()
+                        } catch (error: Exception) {
+                            failHighSpeedSegment(
+                                code = "high_speed_session_failed",
+                                message = error.message ?: "Unable to configure high-speed session.",
+                            )
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        failHighSpeedSegment(
+                            code = "high_speed_session_failed",
+                            message = "Unable to configure high-speed camera session.",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            failHighSpeedSegment(
+                code = "high_speed_session_failed",
+                message = error.message ?: "Unable to create high-speed camera session.",
+            )
+        }
+    }
+
+    private fun configureNativeVideoSession(
+        device: CameraDevice,
+        config: HighSpeedRecordingConfig,
+        previewSurface: Surface,
+        recorderSurface: Surface,
+    ) {
+        try {
+            device.createCaptureSession(
+                listOf(previewSurface, recorderSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        nativeVideoSession = session
+                        try {
+                            val requestBuilder =
+                                device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                            requestBuilder.addTarget(previewSurface)
+                            requestBuilder.addTarget(recorderSurface)
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_MODE,
+                                CaptureRequest.CONTROL_MODE_AUTO,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_CAPTURE_INTENT,
+                                CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_MODE,
+                                CaptureRequest.CONTROL_AE_MODE_ON,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                config.fpsRange,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AF_MODE,
+                                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+                            )
+                            session.setRepeatingRequest(
+                                requestBuilder.build(),
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureFailed(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        failure: CaptureFailure,
+                                    ) {
+                                        reportHighSpeedCaptureFailure(
+                                            message =
+                                                "Native ${config.targetFps}fps camera capture failed: " +
+                                                    "reason=${failure.reason}, " +
+                                                    "frame=${failure.frameNumber}, " +
+                                                    "captured=${failure.wasImageCaptured()}.",
+                                        )
+                                    }
+                                },
+                                mainHandler,
+                            )
+                            highSpeedRecorder?.start()
+                            currentSegmentStartEpochMs = System.currentTimeMillis()
+                            highSpeedSegmentStarting = false
+                            currentHighSpeedSegmentActive = true
+                            scheduleHighSpeedPoseSamplingIfNeeded()
+
+                            if (highSpeedStopRequestedWhileStarting) {
+                                val restart = currentSegmentRestartAfterFinalize
+                                val callback = currentSegmentFinalizeCallback
+                                currentSegmentRestartAfterFinalize = false
+                                currentSegmentFinalizeCallback = null
+                                highSpeedStopRequestedWhileStarting = false
+                                stopHighSpeedSegment(
+                                    restartAfterFinalize = restart,
+                                    callback = callback,
+                                )
+                                return
+                            }
+
+                            mainHandler.removeCallbacks(segmentRotationRunnable)
+                            mainHandler.postDelayed(
+                                segmentRotationRunnable,
+                                segmentDurationMs,
+                            )
+                            sendBufferState()
+                        } catch (error: Exception) {
+                            failHighSpeedSegment(
+                                code = "native_video_session_failed",
+                                message = error.message ?: "Unable to configure native video session.",
+                            )
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        failHighSpeedSegment(
+                            code = "native_video_session_failed",
+                            message = "Unable to configure native video camera session.",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            failHighSpeedSegment(
+                code = "native_video_session_failed",
+                message = error.message ?: "Unable to create native video camera session.",
+            )
+        }
+    }
+
+    private fun stopHighSpeedSegment(
+        restartAfterFinalize: Boolean,
+        callback: ((BufferedSegment?) -> Unit)?,
+    ) {
+        if (highSpeedSegmentStarting && !currentHighSpeedSegmentActive) {
+            currentSegmentRestartAfterFinalize = restartAfterFinalize
+            currentSegmentFinalizeCallback = callback
+            highSpeedStopRequestedWhileStarting = true
+            mainHandler.removeCallbacks(segmentRotationRunnable)
+            return
+        }
+
+        mainHandler.removeCallbacks(segmentRotationRunnable)
+        val path = currentSegmentPath
+        val startedAt = currentSegmentStartEpochMs
+        val configKey = activeHighSpeedConfigKey
+        val targetFps = activeHighSpeedTargetFps
+        val shouldContinueBuffering = bufferingEnabled && !highSpeedFallbackActive
+        currentSegmentPath = null
+        currentSegmentStartEpochMs = 0L
+        highSpeedSegmentStarting = false
+        currentHighSpeedSegmentActive = false
+        highSpeedStopRequestedWhileStarting = false
+        highSpeedCaptureFailureReported = false
+
+        var stoppedCleanly = false
+        try {
+            highSpeedSession?.stopRepeating()
+        } catch (_: Exception) {
+            // The recorder stop below is the source of truth for whether the file is valid.
+        }
+        try {
+            nativeVideoSession?.stopRepeating()
+        } catch (_: Exception) {
+            // The recorder stop below is the source of truth for whether the file is valid.
+        }
+        try {
+            highSpeedRecorder?.stop()
+            stoppedCleanly = true
+        } catch (_: RuntimeException) {
+            stoppedCleanly = false
+        } finally {
+            releaseHighSpeedResources()
+        }
+
+        val outputFile = path?.let { File(it) }
+        val segment = if (
+            stoppedCleanly &&
+                outputFile != null &&
+                outputFile.exists() &&
+                outputFile.length() > 4096L &&
+                startedAt > 0L
+        ) {
+            BufferedSegment(
+                path = outputFile.absolutePath,
+                startEpochMs = startedAt,
+                endEpochMs = System.currentTimeMillis(),
+                targetFps = targetFps,
+            ).takeIf {
+                val achievedFps = probeVideoTrackNominalFrameRate(outputFile.absolutePath)
+                lastAchievedFps = achievedFps
+                val valid = isRecordedSegmentFpsValid(
+                    targetFps = targetFps,
+                    achievedFps = achievedFps,
+                )
+                if (!valid) {
+                    Log.w(
+                        ROLLING_BUFFER_LOG,
+                        "Discarding segment below target fps target=$targetFps " +
+                            "achieved=$achievedFps key=$configKey",
+                    )
+                }
+                valid
+            }?.also { completed ->
+                completedSegments.addLast(completed)
+                pruneSegments(nowEpochMs = completed.endEpochMs)
+            }
+        } else {
+            configKey?.let { failedHighSpeedConfigKeys.add(it) }
+            outputFile?.delete()
+            null
+        }
+        if (
+            stoppedCleanly &&
+                segment == null &&
+                outputFile != null &&
+                outputFile.exists()
+        ) {
+            configKey?.let { failedHighSpeedConfigKeys.add(it) }
+            outputFile.delete()
+        }
+
+        callback?.invoke(segment)
+        if (restartAfterFinalize && bufferingEnabled) {
+            startNewSegment()
+        } else if (segment == null && shouldContinueBuffering) {
+            startNewSegment()
+        }
+        sendBufferState()
+    }
+
+    private fun reportHighSpeedCaptureFailure(message: String) {
+        if (highSpeedCaptureFailureReported) {
+            return
+        }
+        if (!currentHighSpeedSegmentActive && !highSpeedSegmentStarting) {
+            return
+        }
+        highSpeedCaptureFailureReported = true
+        mainHandler.post {
+            failHighSpeedSegment(
+                code = "high_speed_capture_failed",
+                message = message,
+            )
+        }
+    }
+
+    private fun failHighSpeedSegment(code: String, message: String) {
+        Log.w(
+            ROLLING_BUFFER_LOG,
+            "High-speed segment failed code=$code message=$message",
+        )
+        val path = currentSegmentPath
+        val shouldContinueBuffering = bufferingEnabled && !highSpeedFallbackActive
+        activeHighSpeedConfigKey?.let { failedHighSpeedConfigKeys.add(it) }
+        val shouldRetryNextHighSpeedProfile =
+            shouldContinueBuffering && currentSegmentFinalizeCallback == null
+        currentSegmentPath = null
+        currentSegmentStartEpochMs = 0L
+        highSpeedSegmentStarting = false
+        currentHighSpeedSegmentActive = false
+        highSpeedStopRequestedWhileStarting = false
+        highSpeedCaptureFailureReported = false
+        releaseHighSpeedResources()
+        path?.let { File(it).delete() }
+
+        val callback = currentSegmentFinalizeCallback
+        val restartAfterFinalize = currentSegmentRestartAfterFinalize
+        currentSegmentFinalizeCallback = null
+        currentSegmentRestartAfterFinalize = false
+        callback?.invoke(null)
+        if (restartAfterFinalize && bufferingEnabled) {
+            startNewSegment()
+        } else if (shouldRetryNextHighSpeedProfile) {
+            startNewSegment()
+        }
+        if (!shouldRetryNextHighSpeedProfile) {
+            sendError(code, message)
+        }
+        sendBufferState()
+    }
+
+    private fun failRequiredHighSpeedBuffer(code: String, message: String) {
+        Log.w(
+            ROLLING_BUFFER_LOG,
+            "Required high-speed buffer unavailable code=$code mode=$videoFpsMode message=$message",
+        )
+        failedHighSpeedConfigKeys.clear()
+        mainHandler.removeCallbacks(segmentRotationRunnable)
+        releaseHighSpeedResources()
+        clearCompletedSegments()
+        if (videoFpsMode == "standard") {
+            bufferingEnabled = true
+            highSpeedFallbackActive = true
+            bindUseCasesIfReady()
+            sendBufferState()
+            return
+        }
+        bufferingEnabled = false
+        highSpeedFallbackActive = false
+        sendError(code, message)
+        sendBufferState()
+        bindUseCasesIfReady()
+    }
+
+    private fun releaseHighSpeedResources() {
+        highSpeedSegmentStarting = false
+        currentHighSpeedSegmentActive = false
+        highSpeedStopRequestedWhileStarting = false
+        highSpeedCaptureFailureReported = false
+        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
+
+        try {
+            highSpeedSession?.close()
+        } catch (_: Exception) {
+        }
+        highSpeedSession = null
+
+        try {
+            nativeVideoSession?.close()
+        } catch (_: Exception) {
+        }
+        nativeVideoSession = null
+
+        try {
+            highSpeedCameraDevice?.close()
+        } catch (_: Exception) {
+        }
+        highSpeedCameraDevice = null
+
+        try {
+            highSpeedRecorder?.reset()
+        } catch (_: Exception) {
+        }
+        try {
+            highSpeedRecorder?.release()
+        } catch (_: Exception) {
+        }
+        highSpeedRecorder = null
+
+        try {
+            highSpeedPreviewSurface?.release()
+        } catch (_: Exception) {
+        }
+        highSpeedPreviewSurface = null
+
+        activeHighSpeedTargetFps = null
+        activeHighSpeedSize = null
+        activeHighSpeedCameraId = null
+        activeHighSpeedConfigKey = null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun prepareHighSpeedMediaRecorder(
+        config: HighSpeedRecordingConfig,
+        outputFile: File,
+    ): MediaRecorder {
+        outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) {
+            outputFile.delete()
+        }
+        val mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(activity)
+        } else {
+            MediaRecorder()
+        }
+        mediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+        mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+        mediaRecorder.setOutputFile(outputFile.absolutePath)
+        mediaRecorder.setVideoEncodingBitRate(encoderBitrateBitsPerSecond())
+        mediaRecorder.setVideoFrameRate(config.targetFps)
+        mediaRecorder.setVideoSize(config.size.width, config.size.height)
+        mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+        mediaRecorder.setOrientationHint(config.orientationHintDegrees)
+        mediaRecorder.prepare()
+        return mediaRecorder
+    }
+
+    private fun selectHighSpeedRecordingConfig(
+        ignoreFailedConfigs: Boolean = false,
+        requireFixedFps: Boolean = false,
+    ): HighSpeedRecordingConfig? {
+        val cameraManager =
+            activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val targetLens = selectedZoomLens()
+        val cameraIds = highSpeedCameraCandidateIds(cameraManager, targetLens)
+        val profiles = highSpeedProfilePriority()
+        for ((desiredSize, desiredFps) in profiles) {
+            Log.i(
+                ROLLING_BUFFER_LOG,
+                "Checking profile ${desiredSize.width}x${desiredSize.height}@$desiredFps",
+            )
+            for (cameraId in cameraIds) {
+                val characteristics = try {
+                    cameraManager.getCameraCharacteristics(cameraId)
+                } catch (_: Exception) {
+                    continue
+                }
+                val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    ?: continue
+                val availableSize = map.highSpeedVideoSizes
+                    ?.firstOrNull {
+                        it.width == desiredSize.width && it.height == desiredSize.height
+                    }
+                if (availableSize != null && desiredFps >= 60) {
+                    val ranges = try {
+                        map.getHighSpeedVideoFpsRangesFor(availableSize).toList()
+                    } catch (_: Exception) {
+                        map.highSpeedVideoFpsRanges?.toList().orEmpty()
+                    }
+                    val range = selectHighSpeedFpsRange(
+                        ranges = ranges,
+                        requestedFps = desiredFps,
+                        requireFixedFps = requireFixedFps || desiredFps >= 120,
+                    )
+                    if (range != null) {
+                        val config = HighSpeedRecordingConfig(
+                            cameraId = cameraId,
+                            fpsRange = range,
+                            targetFps = range.upper,
+                            size = availableSize,
+                            orientationHintDegrees = videoOrientationHintForCamera(characteristics),
+                            constrainedHighSpeed = true,
+                        )
+                        if (!ignoreFailedConfigs && failedHighSpeedConfigKeys.contains(config.failureKey)) {
+                            continue
+                        }
+                        return config
+                    }
+                }
+
+                if (desiredFps == 60 || desiredFps == 30) {
+                    val standardConfig = selectNativeVideoRecordingConfig(
+                        cameraId = cameraId,
+                        characteristics = characteristics,
+                        desiredSize = desiredSize,
+                        desiredFps = desiredFps,
+                    )
+                    if (standardConfig != null) {
+                        if (
+                            !ignoreFailedConfigs &&
+                            failedHighSpeedConfigKeys.contains(standardConfig.failureKey)
+                        ) {
+                            continue
+                        }
+                        return standardConfig
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun selectNativeVideoRecordingConfig(
+        cameraId: String,
+        characteristics: CameraCharacteristics,
+        desiredSize: Size,
+        desiredFps: Int,
+    ): HighSpeedRecordingConfig? {
+        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: return null
+        val supportsRecorderSize = map.getOutputSizes(MediaRecorder::class.java)
+            ?.any { it.width == desiredSize.width && it.height == desiredSize.height }
+            ?: false
+        if (!supportsRecorderSize) {
+            return null
+        }
+        val range = selectHighSpeedFpsRange(
+            ranges = characteristics
+                .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.toList()
+                .orEmpty(),
+            requestedFps = desiredFps,
+            requireFixedFps = false,
+        ) ?: return null
+        return HighSpeedRecordingConfig(
+            cameraId = cameraId,
+            fpsRange = range,
+            targetFps = desiredFps,
+            size = desiredSize,
+            orientationHintDegrees = videoOrientationHintForCamera(characteristics),
+            constrainedHighSpeed = false,
+        )
+    }
+
+    private fun highSpeedProfilePriority(): List<Pair<Size, Int>> {
+        return listOf(
+            Size(1920, 1080) to 120,
+            Size(1280, 720) to 120,
+            Size(1920, 1080) to 60,
+            Size(1280, 720) to 60,
+            Size(1920, 1080) to 30,
+        )
+    }
+
+    private fun highSpeedCameraCandidateIds(
+        cameraManager: CameraManager,
+        targetLens: ZoomLens?,
+    ): List<String> {
+        val availableIds = cameraManager.cameraIdList.toSet()
+        val candidates = mutableListOf<String>()
+        targetLens?.physicalCameraId
+            ?.takeIf { availableIds.contains(it) }
+            ?.let { candidates.add(it) }
+        targetLens?.logicalCameraId
+            ?.takeIf { availableIds.contains(it) }
+            ?.let { candidates.add(it) }
+
+        for (cameraId in cameraManager.cameraIdList) {
+            val characteristics = try {
+                cameraManager.getCameraCharacteristics(cameraId)
+            } catch (_: Exception) {
+                continue
+            }
+            if (characteristics.get(CameraCharacteristics.LENS_FACING) == lensFacing) {
+                candidates.add(cameraId)
+            }
+        }
+        return candidates.distinct()
+    }
+
+    private fun selectHighSpeedFpsRange(
+        ranges: List<Range<Int>>,
+        requestedFps: Int,
+        requireFixedFps: Boolean = false,
+    ): Range<Int>? {
+        if (ranges.isEmpty()) {
+            return null
+        }
+        if (requireFixedFps) {
+            return ranges
+                .filter { it.lower == it.upper && it.upper == requestedFps }
+                .sortedWith(
+                    compareBy<Range<Int>> { abs(it.upper - requestedFps) }
+                        .thenByDescending { it.upper },
+                )
+                .firstOrNull()
+        }
+
+        return ranges
+            .filter { it.upper == requestedFps }
+            .sortedWith(
+                compareBy<Range<Int>> { abs(it.upper - requestedFps) }
+                    .thenBy { if (it.lower == it.upper) 0 else 1 }
+                    .thenByDescending { it.lower },
+            )
+            .firstOrNull()
+    }
+
+    private fun selectHighSpeedVideoSize(sizes: List<Size>): Size? {
+        if (sizes.isEmpty()) {
+            return null
+        }
+        val maxArea = if (videoFpsMode == "maxSupported") {
+            1920 * 1080
+        } else {
+            1280 * 720
+        }
+        val sameAspect = sizes.filter { abs(it.width * 9 - it.height * 16) <= it.width }
+        val candidates = sameAspect.ifEmpty { sizes }
+        return candidates
+            .filter { it.width * it.height <= maxArea }
+            .maxByOrNull { it.width * it.height }
+            ?: candidates.minByOrNull { it.width * it.height }
+    }
+
+    private fun videoOrientationHintForCamera(
+        characteristics: CameraCharacteristics,
+    ): Int {
+        val sensorOrientation =
+            characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val deviceRotation = displayRotationDegrees()
+        val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+        return if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation + deviceRotation) % 360
+        } else {
+            (sensorOrientation - deviceRotation + 360) % 360
+        }
+    }
+
+    private fun scheduleHighSpeedPoseSamplingIfNeeded() {
+        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
+        if (
+            detectionEnabled &&
+                (currentHighSpeedSegmentActive ||
+                    androidHighSpeedCaptureEngine.isRunningOrStarting) &&
+                previewView?.isAvailable == true
+        ) {
+            mainHandler.postDelayed(highSpeedPoseSamplingRunnable, poseFrameIntervalMs)
+        }
+    }
+
+    private fun canStartPoseAnalysis(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (!detectionEnabled || isProcessingPose) {
+            return false
+        }
+        return nowMs - lastPoseAnalysisStartedMs >= poseFrameIntervalMs
+    }
+
+    private fun markPoseAnalysisStarted(nowMs: Long = System.currentTimeMillis()) {
+        lastPoseAnalysisStartedMs = nowMs
+        isProcessingPose = true
+    }
+
+    private fun sampleHighSpeedPreviewPoseFrame() {
+        val view = previewView ?: return
+        if (
+            (!currentHighSpeedSegmentActive &&
+                !androidHighSpeedCaptureEngine.isRunningOrStarting) ||
+            !view.isAvailable
+        ) {
+            return
+        }
+        val nowMs = System.currentTimeMillis()
+        if (!canStartPoseAnalysis(nowMs)) {
+            return
+        }
+        val viewWidth = view.width
+        val viewHeight = view.height
+        if (viewWidth <= 0 || viewHeight <= 0) {
+            return
+        }
+
+        val maxBitmapWidth = if (
+            isHighFpsRollingBuffer() ||
+                androidHighSpeedCaptureEngine.isRunningOrStarting
+        ) {
+            maxHighSpeedPreviewPoseBitmapWidth
+        } else {
+            maxPreviewPoseBitmapWidth
+        }
+        val sampleWidth = minOf(viewWidth, maxBitmapWidth)
+        val sampleHeight = maxOf(1, viewHeight * sampleWidth / viewWidth)
+        val bitmap = try {
+            view.getBitmap(sampleWidth, sampleHeight)
+        } catch (_: Exception) {
+            null
+        } ?: return
+
+        if (debugSelfTestActive) {
+            debugSelfTestPoseAttempts += 1
+        }
+        markPoseAnalysisStarted(nowMs)
+        val rotationDegrees = displayRotationDegrees()
+        val inputImage = InputImage.fromBitmap(bitmap, rotationDegrees)
+        poseDetector.process(inputImage)
+            .addOnSuccessListener(mainExecutor) { pose ->
+                if (debugSelfTestActive) {
+                    debugSelfTestPoseResults += 1
+                }
+                sendPoseEvent(
+                    pose = pose,
+                    imageWidth = bitmap.width,
+                    imageHeight = bitmap.height,
+                    rotationDegrees = rotationDegrees,
+                )
+            }
+            .addOnFailureListener(mainExecutor) { error ->
+                sendError(
+                    code = "pose_detection_failed",
+                    message = error.message ?: "Pose detection failed.",
+                )
+            }
+            .addOnCompleteListener(mainExecutor) {
+                isProcessingPose = false
+                bitmap.recycle()
+            }
+    }
+
     @OptIn(ExperimentalGetImage::class)
     private fun analyzeFrame(imageProxy: ImageProxy) {
-        if (!detectionEnabled || isProcessingPose) {
+        val nowMs = System.currentTimeMillis()
+        if (!canStartPoseAnalysis(nowMs)) {
             imageProxy.close()
             return
         }
@@ -1117,7 +2466,7 @@ class NativeCapturePipeline(
             return
         }
 
-        isProcessingPose = true
+        markPoseAnalysisStarted(nowMs)
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
         poseDetector.process(inputImage)
@@ -1158,11 +2507,12 @@ class NativeCapturePipeline(
     }
 
     private fun onRtmpPoseImage(image: Image) {
-        if (!detectionEnabled || isProcessingPose) {
+        val nowMs = System.currentTimeMillis()
+        if (!canStartPoseAnalysis(nowMs)) {
             image.close()
             return
         }
-        isProcessingPose = true
+        markPoseAnalysisStarted(nowMs)
         val rotationDegrees = displayRotationDegrees()
         val inputImage = InputImage.fromMediaImage(image, rotationDegrees)
         val w = image.width
@@ -1258,6 +2608,548 @@ class NativeCapturePipeline(
         )
     }
 
+    private fun runStartupBufferTest(
+        durationMs: Int,
+        result: MethodChannel.Result,
+    ) {
+        if (startupBufferTestActive) {
+            result.error(
+                "startup_buffer_busy",
+                "Startup high-speed buffer test is already running.",
+                null,
+            )
+            return
+        }
+        if (
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            result.error("camera_permission_missing", "Camera permission is required.", null)
+            return
+        }
+
+        startupBufferTestActive = true
+        Log.i(STARTUP_BUFFER_TEST_LOG, "Starting startup buffer test durationMs=$durationMs")
+        startupTestExecutor.execute {
+            try {
+                val payload = runStartupBufferTestBlocking(durationMs)
+                Log.i(STARTUP_BUFFER_TEST_LOG, "Startup buffer test succeeded: $payload")
+                mainHandler.post { result.success(payload) }
+            } catch (error: Exception) {
+                Log.w(
+                    STARTUP_BUFFER_TEST_LOG,
+                    "Startup buffer test failed: ${error.message}",
+                    error,
+                )
+                mainHandler.post {
+                    result.error(
+                        "startup_buffer_failed",
+                        error.message ?: "Startup high-speed buffer test failed.",
+                        null,
+                    )
+                }
+            } finally {
+                mainHandler.post {
+                    startupBufferTestActive = false
+                    if (previewRequested) {
+                        bindUseCasesIfReady()
+                    }
+                }
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun runStartupBufferTestBlocking(durationMs: Int): Map<String, Any?> {
+        val config = selectHighSpeedRecordingConfig(
+            ignoreFailedConfigs = true,
+            requireFixedFps = false,
+        ) ?: throw IllegalStateException(
+            "No high-speed camera mode is available.",
+        )
+        Log.i(
+            STARTUP_BUFFER_TEST_LOG,
+            "Using camera=${config.cameraId} fps=${config.fpsRange} size=${config.size}",
+        )
+
+        val outputFile = File(
+            clipsDirectory,
+            "startup_buffer_${System.currentTimeMillis()}.mp4",
+        )
+
+        var codec: MediaCodec? = null
+        var inputSurface: Surface? = null
+        var previewSurface: Surface? = null
+        var muxer: MediaMuxer? = null
+        var codecStarted = false
+        val drainState = StartupEncoderDrainState()
+        val cameraRef = AtomicReference<CameraDevice?>(null)
+        val sessionRef = AtomicReference<CameraConstrainedHighSpeedCaptureSession?>(null)
+        val captureFailure = AtomicReference<String?>(null)
+
+        try {
+            runOnMainSync {
+                stopBuffering(discardSegments = false)
+                camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
+                cameraProvider?.unbindAll()
+                releaseHighSpeedResources()
+                camera = null
+                previewUseCase = null
+                analysisUseCase = null
+                videoCapture = null
+                recorder = null
+            }
+
+            outputFile.parentFile?.mkdirs()
+            if (outputFile.exists()) {
+                outputFile.delete()
+            }
+
+            codec = MediaCodec.createEncoderByType("video/avc")
+            val format = MediaFormat.createVideoFormat(
+                "video/avc",
+                config.size.width,
+                config.size.height,
+            )
+            format.setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
+            )
+            format.setInteger(MediaFormat.KEY_BIT_RATE, encoderBitrateBitsPerSecond())
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, config.targetFps)
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            inputSurface = codec.createInputSurface()
+            codec.start()
+            codecStarted = true
+
+            muxer = MediaMuxer(
+                outputFile.absolutePath,
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4,
+            )
+            muxer.setOrientationHint(config.orientationHintDegrees)
+            previewSurface = createStartupPreviewSurface(config)
+
+            startStartupCameraSession(
+                config = config,
+                encoderSurface = inputSurface,
+                previewSurface = previewSurface,
+                cameraRef = cameraRef,
+                sessionRef = sessionRef,
+                captureFailure = captureFailure,
+            )
+
+            val deadlineNs = System.nanoTime() + durationMs * 1_000_000L
+            while (System.nanoTime() < deadlineNs) {
+                captureFailure.get()?.let { throw IllegalStateException(it) }
+                drainStartupEncoder(codec, muxer, drainState, timeoutUs = 10_000L)
+            }
+
+            stopStartupCameraSession(sessionRef, cameraRef)
+            codec.signalEndOfInputStream()
+            val eosDeadlineNs = System.nanoTime() + 2_000_000_000L
+            var sawEos = false
+            while (!sawEos && System.nanoTime() < eosDeadlineNs) {
+                sawEos = drainStartupEncoder(
+                    codec,
+                    muxer,
+                    drainState,
+                    timeoutUs = 100_000L,
+                )
+            }
+            if (!sawEos) {
+                throw IllegalStateException("Timed out while finalizing startup buffer test.")
+            }
+
+            if (drainState.frameCount < 2) {
+                throw IllegalStateException("Startup buffer test did not produce a valid video.")
+            }
+
+            if (drainState.muxerStarted) {
+                muxer.stop()
+                drainState.muxerStarted = false
+            }
+            muxer.release()
+            muxer = null
+
+            if (!outputFile.exists() || outputFile.length() <= 4096L) {
+                throw IllegalStateException("Startup buffer test did not produce a valid video.")
+            }
+
+            val measuredFps = if (
+                drainState.frameCount >= 2 &&
+                    drainState.lastPtsUs > drainState.firstPtsUs
+            ) {
+                (drainState.frameCount - 1) * 1_000_000.0 /
+                    (drainState.lastPtsUs - drainState.firstPtsUs)
+            } else {
+                null
+            }
+            val achievedFps =
+                deriveVideoFrameRateFromSamples(outputFile.absolutePath) ?: measuredFps
+            val measuredDurationMs = if (drainState.lastPtsUs > drainState.firstPtsUs) {
+                ((drainState.lastPtsUs - drainState.firstPtsUs) / 1000L).toInt()
+            } else {
+                durationMs
+            }
+
+            return mapOf(
+                "outputPath" to outputFile.absolutePath,
+                "durationMs" to measuredDurationMs,
+                "targetFps" to config.targetFps,
+                "sizeBytes" to outputFile.length(),
+                "frameCount" to drainState.frameCount,
+                "achievedFps" to achievedFps,
+            )
+        } catch (error: Exception) {
+            outputFile.delete()
+            throw error
+        } finally {
+            stopStartupCameraSession(sessionRef, cameraRef)
+            if (codecStarted) {
+                try {
+                    codec?.stop()
+                } catch (_: Exception) {
+                }
+            }
+            try {
+                codec?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                inputSurface?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                if (drainState.muxerStarted) {
+                    muxer?.stop()
+                }
+            } catch (_: Exception) {
+            }
+            try {
+                muxer?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                previewSurface?.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun createStartupPreviewSurface(config: HighSpeedRecordingConfig): Surface? {
+        var previewSurface: Surface? = null
+        runOnMainSync {
+            val texture = previewView?.surfaceTexture ?: return@runOnMainSync
+            texture.setDefaultBufferSize(config.size.width, config.size.height)
+            previewSurface = Surface(texture)
+        }
+        return previewSurface
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startStartupCameraSession(
+        config: HighSpeedRecordingConfig,
+        encoderSurface: Surface,
+        previewSurface: Surface?,
+        cameraRef: AtomicReference<CameraDevice?>,
+        sessionRef: AtomicReference<CameraConstrainedHighSpeedCaptureSession?>,
+        captureFailure: AtomicReference<String?>,
+    ) {
+        val readyLatch = CountDownLatch(1)
+        val readyError = AtomicReference<String?>(null)
+        val cameraManager =
+            activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+        mainHandler.post {
+            try {
+                cameraManager.openCamera(
+                    config.cameraId,
+                    object : CameraDevice.StateCallback() {
+                        override fun onOpened(device: CameraDevice) {
+                            cameraRef.set(device)
+                            createStartupHighSpeedSession(
+                                device = device,
+                                config = config,
+                                encoderSurface = encoderSurface,
+                                previewSurface = previewSurface,
+                                sessionRef = sessionRef,
+                                readyLatch = readyLatch,
+                                readyError = readyError,
+                                captureFailure = captureFailure,
+                            )
+                        }
+
+                        override fun onDisconnected(device: CameraDevice) {
+                            device.close()
+                            readyError.compareAndSet(
+                                null,
+                                "Startup high-speed camera disconnected.",
+                            )
+                            readyLatch.countDown()
+                        }
+
+                        override fun onError(device: CameraDevice, error: Int) {
+                            device.close()
+                            readyError.compareAndSet(
+                                null,
+                                "Startup high-speed camera open failed: $error.",
+                            )
+                            readyLatch.countDown()
+                        }
+                    },
+                    mainHandler,
+                )
+            } catch (error: Exception) {
+                readyError.compareAndSet(
+                    null,
+                    error.message ?: "Unable to open startup high-speed camera.",
+                )
+                readyLatch.countDown()
+            }
+        }
+
+        if (!readyLatch.await(6, TimeUnit.SECONDS)) {
+            throw IllegalStateException("Timed out opening startup high-speed camera.")
+        }
+        readyError.get()?.let { throw IllegalStateException(it) }
+    }
+
+    private fun createStartupHighSpeedSession(
+        device: CameraDevice,
+        config: HighSpeedRecordingConfig,
+        encoderSurface: Surface,
+        previewSurface: Surface?,
+        sessionRef: AtomicReference<CameraConstrainedHighSpeedCaptureSession?>,
+        readyLatch: CountDownLatch,
+        readyError: AtomicReference<String?>,
+        captureFailure: AtomicReference<String?>,
+    ) {
+        try {
+            val outputs = if (previewSurface == null) {
+                listOf(encoderSurface)
+            } else {
+                listOf(previewSurface, encoderSurface)
+            }
+            device.createConstrainedHighSpeedCaptureSession(
+                outputs,
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        val highSpeed =
+                            session as? CameraConstrainedHighSpeedCaptureSession
+                        if (highSpeed == null) {
+                            readyError.compareAndSet(
+                                null,
+                                "Camera did not create a startup high-speed session.",
+                            )
+                            readyLatch.countDown()
+                            return
+                        }
+                        sessionRef.set(highSpeed)
+                        try {
+                            val requestBuilder =
+                                device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                            previewSurface?.let { requestBuilder.addTarget(it) }
+                            requestBuilder.addTarget(encoderSurface)
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_MODE,
+                                CaptureRequest.CONTROL_MODE_AUTO,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_CAPTURE_INTENT,
+                                CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_MODE,
+                                CaptureRequest.CONTROL_AE_MODE_ON,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                config.fpsRange,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_AF_MODE,
+                                CaptureRequest.CONTROL_AF_MODE_OFF,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+                            )
+                            requestBuilder.set(
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+                            )
+                            val requests = highSpeed.createHighSpeedRequestList(
+                                requestBuilder.build(),
+                            )
+                            highSpeed.setRepeatingBurst(
+                                requests,
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureFailed(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        failure: CaptureFailure,
+                                    ) {
+                                        captureFailure.compareAndSet(
+                                            null,
+                                            "Startup high-speed capture failed: " +
+                                                "reason=${failure.reason}, " +
+                                                "frame=${failure.frameNumber}, " +
+                                                "captured=${failure.wasImageCaptured()}.",
+                                        )
+                                    }
+
+                                    override fun onCaptureSequenceAborted(
+                                        session: CameraCaptureSession,
+                                        sequenceId: Int,
+                                    ) {
+                                        captureFailure.compareAndSet(
+                                            null,
+                                            "Startup high-speed capture was aborted.",
+                                        )
+                                    }
+                                },
+                                mainHandler,
+                            )
+                            readyLatch.countDown()
+                        } catch (error: Exception) {
+                            readyError.compareAndSet(
+                                null,
+                                error.message ?: "Unable to start startup high-speed request.",
+                            )
+                            readyLatch.countDown()
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        readyError.compareAndSet(
+                            null,
+                            "Unable to configure startup high-speed camera session.",
+                        )
+                        readyLatch.countDown()
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            readyError.compareAndSet(
+                null,
+                error.message ?: "Unable to create startup high-speed camera session.",
+            )
+            readyLatch.countDown()
+        }
+    }
+
+    private fun drainStartupEncoder(
+        codec: MediaCodec,
+        muxer: MediaMuxer,
+        state: StartupEncoderDrainState,
+        timeoutUs: Long,
+    ): Boolean {
+        val bufferInfo = MediaCodec.BufferInfo()
+        var waitUs = timeoutUs
+        while (true) {
+            when (val index = codec.dequeueOutputBuffer(bufferInfo, waitUs)) {
+                MediaCodec.INFO_TRY_AGAIN_LATER -> return false
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    if (state.muxerStarted) {
+                        throw IllegalStateException("Startup encoder format changed twice.")
+                    }
+                    state.trackIndex = muxer.addTrack(codec.outputFormat)
+                    muxer.start()
+                    state.muxerStarted = true
+                }
+                MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
+                    // No-op on API levels that still report this signal.
+                }
+                else -> {
+                    if (index < 0) {
+                        return false
+                    }
+                    val encodedBuffer = codec.getOutputBuffer(index)
+                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        bufferInfo.size = 0
+                    }
+                    if (bufferInfo.size > 0) {
+                        if (!state.muxerStarted || state.trackIndex < 0) {
+                            throw IllegalStateException(
+                                "Startup encoder emitted data before muxer start.",
+                            )
+                        }
+                        if (encodedBuffer == null) {
+                            throw IllegalStateException("Startup encoder output buffer was null.")
+                        }
+                        encodedBuffer.position(bufferInfo.offset)
+                        encodedBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                        muxer.writeSampleData(state.trackIndex, encodedBuffer, bufferInfo)
+                        if (bufferInfo.presentationTimeUs >= 0) {
+                            if (state.firstPtsUs < 0) {
+                                state.firstPtsUs = bufferInfo.presentationTimeUs
+                            }
+                            state.lastPtsUs = bufferInfo.presentationTimeUs
+                        }
+                        state.frameCount += 1
+                    }
+                    val sawEos =
+                        (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    codec.releaseOutputBuffer(index, false)
+                    if (sawEos) {
+                        return true
+                    }
+                }
+            }
+            waitUs = 0L
+        }
+    }
+
+    private fun stopStartupCameraSession(
+        sessionRef: AtomicReference<CameraConstrainedHighSpeedCaptureSession?>,
+        cameraRef: AtomicReference<CameraDevice?>,
+    ) {
+        runOnMainSync {
+            val session = sessionRef.getAndSet(null)
+            try {
+                session?.stopRepeating()
+            } catch (_: Exception) {
+            }
+            try {
+                session?.abortCaptures()
+            } catch (_: Exception) {
+            }
+            try {
+                session?.close()
+            } catch (_: Exception) {
+            }
+            val cameraDevice = cameraRef.getAndSet(null)
+            try {
+                cameraDevice?.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun runOnMainSync(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+            return
+        }
+        val latch = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>(null)
+        mainHandler.post {
+            try {
+                block()
+            } catch (error: Throwable) {
+                failure.set(error)
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(3, TimeUnit.SECONDS)) {
+            throw IllegalStateException("Timed out waiting for camera main thread.")
+        }
+        failure.get()?.let { throw IllegalStateException(it.message, it) }
+    }
+
     private fun saveBufferedClip(
         outputPath: String,
         triggerEpochMs: Long,
@@ -1268,8 +3160,8 @@ class NativeCapturePipeline(
             return
         }
 
-        val clipStartEpochMs = triggerEpochMs - preRollMs
-        val clipEndEpochMs = triggerEpochMs + postRollMs
+        val clipStartEpochMs = triggerEpochMs - ROLLING_BUFFER_QUEUE_MS
+        val clipEndEpochMs = triggerEpochMs
         sealCurrentSegment(
             restartAfterFinalize = true,
             callback = {
@@ -1290,6 +3182,7 @@ class NativeCapturePipeline(
 
                 mergeExecutor.execute {
                     try {
+                        validateRequiredHighSpeedSegments(selectedSegments)
                         mergeSegments(
                             segments = selectedSegments,
                             outputPath = outputPath,
@@ -1309,6 +3202,39 @@ class NativeCapturePipeline(
                 }
             },
         )
+    }
+
+    private fun validateRequiredHighSpeedSegments(segments: List<BufferedSegment>) {
+        for (segment in segments) {
+            val targetFps = segment.targetFps ?: continue
+            val fps = probeVideoTrackNominalFrameRate(segment.path)
+                ?: throw IllegalStateException(
+                    "Unable to verify ${targetFps}fps rolling-buffer segment.",
+                )
+            val minimumFps = minimumRecordedFpsForTarget(targetFps)
+            if (fps < minimumFps) {
+                throw IllegalStateException(
+                    "Rolling-buffer segment is ${"%.1f".format(fps)}fps, expected ${targetFps}fps.",
+                )
+            }
+        }
+    }
+
+    private fun isRecordedSegmentFpsValid(targetFps: Int?, achievedFps: Double?): Boolean {
+        if (targetFps == null) {
+            return true
+        }
+        val fps = achievedFps ?: return false
+        return fps >= minimumRecordedFpsForTarget(targetFps)
+    }
+
+    private fun minimumRecordedFpsForTarget(targetFps: Int): Double {
+        val toleranceFloor = targetFps * HIGH_SPEED_EXPORT_FPS_TOLERANCE
+        return if (targetFps >= 60) {
+            maxOf(MIN_REQUIRED_HIGH_SPEED_EXPORT_FPS, toleranceFloor)
+        } else {
+            toleranceFloor
+        }
     }
 
     private fun mergeSegments(
@@ -1351,6 +3277,7 @@ class NativeCapturePipeline(
             }
 
             val vFmt = videoFormat!!
+            writeFrameRateIntoFormat(vFmt, probeVideoTrackNominalFrameRate(firstPath))
             val outputVideoTrack = muxer.addTrack(vFmt)
             val outputAudioTrack = audioFormat?.let { muxer.addTrack(it) } ?: -1
 
@@ -1553,7 +3480,7 @@ class NativeCapturePipeline(
     }
 
     private fun pruneSegments(nowEpochMs: Long) {
-        val cutoff = nowEpochMs - (preRollMs + postRollMs + pruneRetentionExtraMs())
+        val cutoff = nowEpochMs - (ROLLING_BUFFER_QUEUE_MS + pruneRetentionExtraMs())
         while (completedSegments.isNotEmpty() && completedSegments.first().endEpochMs < cutoff) {
             val expired = completedSegments.removeFirst()
             File(expired.path).delete()
@@ -1589,16 +3516,54 @@ class NativeCapturePipeline(
     }
 
     private fun sendBufferState() {
+        val segmentRecording = currentRecording != null || currentHighSpeedSegmentActive
+        val targetFps = when {
+            highSpeedFallbackActive -> 30
+            activeHighSpeedTargetFps != null -> activeHighSpeedTargetFps!!
+            else -> nominalTargetFpsForPreference()
+        }
+        val profileSize = activeHighSpeedSize
+        val bufferFrameCapacity = ((targetFps * ROLLING_BUFFER_QUEUE_MS) / 1000L)
+            .toInt()
+            .coerceAtLeast(1)
+        val profileWidth = profileSize?.width ?: 0
+        val profileHeight = profileSize?.height ?: 0
+        val stateKey = listOf(
+            bufferingEnabled,
+            segmentRecording,
+            highSpeedSegmentStarting,
+            completedSegments.size,
+            targetFps,
+            profileWidth,
+            profileHeight,
+            bufferFrameCapacity,
+        ).joinToString(separator = ":")
+        if (lastLoggedBufferStateKey != stateKey) {
+            Log.i(
+                ROLLING_BUFFER_LOG,
+                "Buffer state buffering=$bufferingEnabled recording=$segmentRecording " +
+                    "starting=$highSpeedSegmentStarting profile=${profileWidth}x$profileHeight " +
+                    "fps=$targetFps frames=$bufferFrameCapacity durationMs=$ROLLING_BUFFER_QUEUE_MS " +
+                    "completed=${completedSegments.size}",
+            )
+            lastLoggedBufferStateKey = stateKey
+        }
         eventSink?.success(
             mapOf(
                 "type" to "buffer_state",
                 "buffering" to bufferingEnabled,
                 "completedSegmentCount" to completedSegments.size,
                 "segmentSliceMs" to segmentDurationMs,
+                "queueFrameCapacity" to bufferFrameCapacity,
+                "queueDurationMs" to ROLLING_BUFFER_QUEUE_MS,
                 "videoFpsMode" to videoFpsMode,
-                "targetFps" to nominalTargetFpsForPreference().toDouble(),
+                "targetFps" to targetFps.toDouble(),
+                "profileWidth" to profileWidth,
+                "profileHeight" to profileHeight,
                 "achievedFps" to lastAchievedFps,
                 "highSpeed" to isHighFpsRollingBuffer(),
+                "segmentRecording" to segmentRecording,
+                "segmentStarting" to highSpeedSegmentStarting,
             ),
         )
     }
@@ -1615,11 +3580,67 @@ class NativeCapturePipeline(
                 }
             }
         } catch (_: Exception) {
+            return deriveVideoFrameRateFromSamples(path)
+        } finally {
+            extractor.release()
+        }
+        return deriveVideoFrameRateFromSamples(path)
+    }
+
+    private fun deriveVideoFrameRateFromSamples(path: String): Double? {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(path)
+            var videoTrack = -1
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)
+                    ?: continue
+                if (mime.startsWith("video/")) {
+                    videoTrack = i
+                    break
+                }
+            }
+            if (videoTrack < 0) {
+                return null
+            }
+
+            extractor.selectTrack(videoTrack)
+            var firstTimeUs = -1L
+            var lastTimeUs = -1L
+            var frames = 0
+            while (frames < 1200 && extractor.sampleTrackIndex == videoTrack) {
+                val sampleTimeUs = extractor.sampleTime
+                if (sampleTimeUs < 0) {
+                    break
+                }
+                if (firstTimeUs < 0) {
+                    firstTimeUs = sampleTimeUs
+                }
+                lastTimeUs = sampleTimeUs
+                frames += 1
+                if (!extractor.advance()) {
+                    break
+                }
+            }
+            if (frames >= 2 && lastTimeUs > firstTimeUs) {
+                return (frames - 1) * 1_000_000.0 / (lastTimeUs - firstTimeUs)
+            }
+        } catch (_: Exception) {
             return null
         } finally {
             extractor.release()
         }
         return null
+    }
+
+    private fun writeFrameRateIntoFormat(format: MediaFormat, frameRate: Double?) {
+        if (frameRate == null || frameRate <= 0.0 || frameRate.isNaN() || frameRate.isInfinite()) {
+            return
+        }
+        format.setInteger(
+            MediaFormat.KEY_FRAME_RATE,
+            frameRate.roundToInt().coerceAtLeast(1),
+        )
     }
 
     private fun sendError(code: String, message: String) {

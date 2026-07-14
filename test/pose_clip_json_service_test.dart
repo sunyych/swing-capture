@@ -71,11 +71,13 @@ void main() {
       userTag: 'forehand',
       modelLabel: 'swing',
       modelConfidence: 0.87,
+      videoFps: 59.94,
     );
 
     expect(payload['schema'], PoseClipJsonService.schemaId);
     expect(payload['schemaVersion'], 1);
     expect((payload['capture'] as Map<String, dynamic>)['clipId'], 'clip-123');
+    expect((payload['capture'] as Map<String, dynamic>)['videoFps'], 59.94);
     expect(
       (payload['capture'] as Map<String, dynamic>)['cameraFacing'],
       'back',

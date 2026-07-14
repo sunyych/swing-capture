@@ -30,6 +30,7 @@ class PoseClipJsonService {
     String? userTag,
     String? modelLabel,
     double? modelConfidence,
+    double? videoFps,
   }) async {
     final file = File(outputPath);
     final parent = file.parent;
@@ -52,6 +53,7 @@ class PoseClipJsonService {
       userTag: userTag,
       modelLabel: modelLabel,
       modelConfidence: modelConfidence,
+      videoFps: videoFps,
     );
 
     const encoder = JsonEncoder.withIndent('  ');
@@ -74,6 +76,7 @@ class PoseClipJsonService {
     String? userTag,
     String? modelLabel,
     double? modelConfidence,
+    double? videoFps,
   }) {
     final sortedFrames = List<PoseFrame>.from(frames)
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -91,6 +94,7 @@ class PoseClipJsonService {
         'videoPath': videoPath,
         'capturePipeline': capturePipeline,
         'cameraFacing': cameraFacing,
+        if (_isValidFps(videoFps)) 'videoFps': _r4(videoFps!),
         'normalization': 'preview_normalized_xy',
         'landmarkSet': 'swingcapture_13',
         'landmarkOrder': [
@@ -107,8 +111,15 @@ class PoseClipJsonService {
         'reviewState': reviewState ?? 'unreviewed',
         'userTag': userTag,
         'modelLabel': modelLabel,
-        'modelConfidence': modelConfidence != null ? _r4(modelConfidence) : null,
-        'lifecycle': {'extracted': true, 'labeled': false, 'verified': false, 'uploaded': false},
+        'modelConfidence': modelConfidence != null
+            ? _r4(modelConfidence)
+            : null,
+        'lifecycle': {
+          'extracted': true,
+          'labeled': false,
+          'verified': false,
+          'uploaded': false,
+        },
       },
       'event': {
         'label': event.label,
@@ -163,9 +174,18 @@ class PoseClipJsonService {
       'complete': _r4(frame.completenessScore()),
       'hasPose': frame.landmarks.isNotEmpty,
       'lmCount': frame.landmarks.length,
+      if (frame.source != null) 'poseSource': frame.source!.name,
+      if (frame.candidateCount != null) 'candidateCount': frame.candidateCount,
+      if (frame.selectionScore != null)
+        'selectionScore': _r4(frame.selectionScore!),
+      if (frame.selectionReason != null)
+        'selectionReason': frame.selectionReason,
       'lm': landmarks,
     };
   }
 
   static double _r4(double value) => (value * 10000).round() / 10000;
+
+  static bool _isValidFps(double? fps) =>
+      fps != null && fps > 0 && !fps.isNaN && !fps.isInfinite;
 }

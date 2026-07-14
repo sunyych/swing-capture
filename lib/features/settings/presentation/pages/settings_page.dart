@@ -191,7 +191,7 @@ class _SettingsView extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Higher fps improves slow-motion clips but increases heat, battery use, and storage. Actual fps depends on the device; many phones fall back to 30–60 fps.',
+                    'High-speed buffer recording uses 120 fps or faster when the device supports it. Higher fps improves slow-motion clips but increases heat, battery use, and storage.',
                     style: Theme.of(
                       context,
                     ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
@@ -220,10 +220,6 @@ class _SettingsView extends StatelessWidget {
                       border: OutlineInputBorder(),
                     ),
                     items: const [
-                      DropdownMenuItem(
-                        value: VideoFpsMode.high60,
-                        child: Text('60 fps'),
-                      ),
                       DropdownMenuItem(
                         value: VideoFpsMode.high120,
                         child: Text('120 fps'),

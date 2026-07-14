@@ -14,6 +14,8 @@ enum PoseLandmark {
   rightAnkle,
 }
 
+enum PoseFrameSource { mlKit, vision, yolo, unknown }
+
 class PoseLandmarkPoint {
   const PoseLandmarkPoint({
     required this.x,
@@ -28,10 +30,21 @@ class PoseLandmarkPoint {
 
 /// A normalized pose frame used by the rule-based swing detector.
 class PoseFrame {
-  const PoseFrame({required this.timestamp, required this.landmarks});
+  const PoseFrame({
+    required this.timestamp,
+    required this.landmarks,
+    this.source,
+    this.candidateCount,
+    this.selectionScore,
+    this.selectionReason,
+  });
 
   final DateTime timestamp;
   final Map<PoseLandmark, PoseLandmarkPoint> landmarks;
+  final PoseFrameSource? source;
+  final int? candidateCount;
+  final double? selectionScore;
+  final String? selectionReason;
 
   /// Landmarks the swing detector and "hitter detected" gate require.
   /// Adding optional landmarks (head/elbows/knees/ankles) for skeleton

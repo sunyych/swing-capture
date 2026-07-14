@@ -9,17 +9,47 @@ void main() {
         'buffering': true,
         'completedSegmentCount': 3,
         'segmentSliceMs': 500,
+        'queueFrameCapacity': 480,
+        'queueDurationMs': 4000,
+        'bufferedFrameCount': 474,
+        'bufferedDurationMs': 3992,
+        'bufferedBytes': 8388608,
         'targetFps': 120.0,
+        'profileWidth': 1920,
+        'profileHeight': 1080,
         'achievedFps': 118.5,
         'highSpeed': true,
+        'segmentRecording': true,
+        'segmentStarting': false,
       });
 
       expect(event.isBuffering, isTrue);
       expect(event.completedSegmentCount, 3);
       expect(event.segmentSliceMs, 500);
+      expect(event.queueFrameCapacity, 480);
+      expect(event.queueDurationMs, 4000);
+      expect(event.bufferedFrameCount, 474);
+      expect(event.bufferedDurationMs, 3992);
+      expect(event.bufferedBytes, 8388608);
       expect(event.targetFps, 120.0);
+      expect(event.profileWidth, 1920);
+      expect(event.profileHeight, 1080);
       expect(event.achievedFps, 118.5);
       expect(event.highSpeed, isTrue);
+      expect(event.segmentRecording, isTrue);
+      expect(event.segmentStarting, isFalse);
+    });
+
+    test('distinguishes requested buffering from active recording segment', () {
+      final event = NativeBufferStateEvent.fromMap({
+        'buffering': true,
+        'segmentRecording': false,
+        'segmentStarting': true,
+      });
+
+      expect(event.isBuffering, isTrue);
+      expect(event.segmentRecording, isFalse);
+      expect(event.segmentStarting, isTrue);
     });
 
     test('uses legacy nominalTargetFps when targetFps is absent', () {
@@ -28,6 +58,12 @@ void main() {
         'nominalTargetFps': 240,
       });
       expect(fromNominal.targetFps, 240.0);
+    });
+
+    test('legacy buffer payload treats buffering as active segment', () {
+      final legacy = NativeBufferStateEvent.fromMap({'buffering': true});
+      expect(legacy.segmentRecording, isTrue);
+      expect(legacy.segmentStarting, isFalse);
     });
 
     test('ignores legacy nominalTargetFps when negative', () {
@@ -116,6 +152,106 @@ void main() {
       expect(progress.totalFrames, 100);
       expect(progress.message, 'Extracting pose JSON... 42%');
     });
+
+    test('dispatches high-speed capture lifecycle events', () {
+      final event = NativeCaptureEvent.fromMap({
+        'type': 'ClipSaved',
+        'path': '/tmp/Swing_20260707_120000.mp4',
+        'durationMs': 3980,
+        'frameCount': 475,
+        'motionScore': 1.2,
+      });
+
+      expect(event, isA<NativeHighSpeedEvent>());
+      final highSpeed = event as NativeHighSpeedEvent;
+      expect(highSpeed.name, 'ClipSaved');
+      expect(highSpeed.clipPath, '/tmp/Swing_20260707_120000.mp4');
+      expect(highSpeed.motionScore, 1.2);
+      expect(highSpeed.payload['frameCount'], 475);
+    });
+
+    test('dispatches high-speed Error event to error parser', () {
+      final event = NativeCaptureEvent.fromMap({
+        'type': 'Error',
+        'code': 'high_speed_unavailable',
+        'message': 'No high-speed camera.',
+      });
+
+      expect(event, isA<NativeCaptureErrorEvent>());
+      final error = event as NativeCaptureErrorEvent;
+      expect(error.code, 'high_speed_unavailable');
+      expect(error.message, 'No high-speed camera.');
+    });
+  });
+
+  group('NativeHighSpeedCapabilities.fromMap', () {
+    test('parses Camera2 high-speed sizes and preferred config', () {
+      final capabilities = NativeHighSpeedCapabilities.fromMap({
+        'supportsHighSpeed': true,
+        'rollingSeconds': 4,
+        'codec': 'video/avc',
+        'preferred': {
+          'cameraId': '0',
+          'lensDirection': 'back',
+          'width': 1920,
+          'height': 1080,
+          'fps': 120,
+          'codec': 'video/avc',
+        },
+        'cameras': [
+          {
+            'cameraId': '0',
+            'lensDirection': 'back',
+            'supportsHighSpeed': true,
+            'highSpeedFpsRanges': [
+              {'lower': 30, 'upper': 120},
+            ],
+            'highSpeedVideoSizes': [
+              {
+                'width': 1920,
+                'height': 1080,
+                'fpsRanges': [
+                  {'lower': 30, 'upper': 120},
+                ],
+                'fps': [120],
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(capabilities.supportsHighSpeed, isTrue);
+      expect(capabilities.preferred?.width, 1920);
+      expect(capabilities.preferred?.fps, 120);
+      expect(capabilities.cameras.single.cameraId, '0');
+      expect(capabilities.cameras.single.highSpeedVideoSizes.single.fps, [120]);
+      expect(
+        capabilities
+            .cameras
+            .single
+            .highSpeedVideoSizes
+            .single
+            .fpsRanges
+            .single
+            .upper,
+        120,
+      );
+    });
+  });
+
+  group('NativeSavedHighSpeedClip.fromMap', () {
+    test('parses saved native clip metadata', () {
+      final clip = NativeSavedHighSpeedClip.fromMap({
+        'path': '/app/high_speed_clips/Swing_20260707_120000.mp4',
+        'displayName': 'Swing_20260707_120000.mp4',
+        'sizeBytes': 123456,
+        'createdAtEpochMs': 1783454400000,
+      });
+
+      expect(clip.displayName, 'Swing_20260707_120000.mp4');
+      expect(clip.sizeBytes, 123456);
+      expect(clip.createdAt.millisecondsSinceEpoch, 1783454400000);
+    });
   });
 
   group('NativeRecordingCapability.fromMap', () {
@@ -145,6 +281,20 @@ void main() {
       expect(
         minimumHighSpeedVideoFpsMode(capability.recommendedFpsMode),
         VideoFpsMode.high240,
+      );
+    });
+
+    test('preserves 60fps capability for high-speed buffer requests', () {
+      final capability = NativeRecordingCapability.fromMap({
+        'maxFps': 60,
+        'supportedFps': [30, 60],
+        'source': 'camera2',
+      });
+
+      expect(capability.recommendedFpsMode, VideoFpsMode.high60);
+      expect(
+        minimumHighSpeedVideoFpsMode(capability.recommendedFpsMode),
+        VideoFpsMode.high60,
       );
     });
 

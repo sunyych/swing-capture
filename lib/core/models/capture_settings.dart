@@ -39,7 +39,23 @@ extension VideoFpsModeWire on VideoFpsMode {
 }
 
 VideoFpsMode minimumHighSpeedVideoFpsMode(VideoFpsMode mode) {
-  return mode == VideoFpsMode.standard ? VideoFpsMode.high60 : mode;
+  return switch (mode) {
+    VideoFpsMode.standard => VideoFpsMode.high120,
+    VideoFpsMode.high60 => VideoFpsMode.high60,
+    VideoFpsMode.high120 ||
+    VideoFpsMode.high240 ||
+    VideoFpsMode.maxSupported => mode,
+  };
+}
+
+VideoFpsMode androidRollingBufferVideoFpsMode(VideoFpsMode mode) {
+  return switch (mode) {
+    VideoFpsMode.standard ||
+    VideoFpsMode.high60 ||
+    VideoFpsMode.high120 ||
+    VideoFpsMode.high240 ||
+    VideoFpsMode.maxSupported => VideoFpsMode.high120,
+  };
 }
 
 VideoFpsMode videoFpsModeFromWire(String? raw) => switch (raw) {
@@ -207,7 +223,7 @@ class CaptureSettings {
       showDebugSkeleton: true,
       autoRecordOnReady: true,
       autoSaveToGallery: true,
-      videoFpsMode: VideoFpsMode.high60,
+      videoFpsMode: VideoFpsMode.high120,
       autoSelectBestFps: true,
       dualCameraRole: DualCameraRole.disabled,
       dualCameraTransportMode: DualCameraTransportMode.wifi,

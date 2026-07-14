@@ -64,7 +64,7 @@ void main() {
       expect(d.showDebugSkeleton, isTrue);
       expect(d.autoRecordOnReady, isTrue);
       expect(d.autoSaveToGallery, isTrue);
-      expect(d.videoFpsMode, VideoFpsMode.high60);
+      expect(d.videoFpsMode, VideoFpsMode.high120);
       expect(d.autoSelectBestFps, isTrue);
       expect(d.dualCameraRole, DualCameraRole.disabled);
       expect(d.dualCameraTransportMode, DualCameraTransportMode.wifi);
@@ -158,29 +158,35 @@ void main() {
       expect(recommendedVideoFpsModeForFps(240), VideoFpsMode.high240);
     });
 
+    test('minimumHighSpeedVideoFpsMode keeps rolling buffer high-speed', () {
+      expect(
+        minimumHighSpeedVideoFpsMode(VideoFpsMode.standard),
+        VideoFpsMode.high120,
+      );
+      expect(
+        minimumHighSpeedVideoFpsMode(VideoFpsMode.high60),
+        VideoFpsMode.high60,
+      );
+      expect(
+        minimumHighSpeedVideoFpsMode(VideoFpsMode.high120),
+        VideoFpsMode.high120,
+      );
+      expect(
+        minimumHighSpeedVideoFpsMode(VideoFpsMode.high240),
+        VideoFpsMode.high240,
+      );
+      expect(
+        minimumHighSpeedVideoFpsMode(VideoFpsMode.maxSupported),
+        VideoFpsMode.maxSupported,
+      );
+    });
+
     test(
-      'minimumHighSpeedVideoFpsMode keeps rolling buffer at 60fps or above',
+      'androidRollingBufferVideoFpsMode starts native fallback at 120fps',
       () {
-        expect(
-          minimumHighSpeedVideoFpsMode(VideoFpsMode.standard),
-          VideoFpsMode.high60,
-        );
-        expect(
-          minimumHighSpeedVideoFpsMode(VideoFpsMode.high60),
-          VideoFpsMode.high60,
-        );
-        expect(
-          minimumHighSpeedVideoFpsMode(VideoFpsMode.high120),
-          VideoFpsMode.high120,
-        );
-        expect(
-          minimumHighSpeedVideoFpsMode(VideoFpsMode.high240),
-          VideoFpsMode.high240,
-        );
-        expect(
-          minimumHighSpeedVideoFpsMode(VideoFpsMode.maxSupported),
-          VideoFpsMode.maxSupported,
-        );
+        for (final mode in VideoFpsMode.values) {
+          expect(androidRollingBufferVideoFpsMode(mode), VideoFpsMode.high120);
+        }
       },
     );
 
@@ -258,14 +264,17 @@ void main() {
       expect(loaded.dualCameraTransportMode, DualCameraTransportMode.wifi);
     });
 
-    test('defaults missing fps preference to 60fps buffer recording', () async {
-      SharedPreferences.setMockInitialValues(const {});
-      final prefs = await SharedPreferences.getInstance();
-      final repository = SharedPrefsSettingsRepository(prefs);
+    test(
+      'defaults missing fps preference to 120fps buffer recording',
+      () async {
+        SharedPreferences.setMockInitialValues(const {});
+        final prefs = await SharedPreferences.getInstance();
+        final repository = SharedPrefsSettingsRepository(prefs);
 
-      final loaded = await repository.loadSettings();
+        final loaded = await repository.loadSettings();
 
-      expect(loaded.videoFpsMode, VideoFpsMode.high60);
-    });
+        expect(loaded.videoFpsMode, VideoFpsMode.high120);
+      },
+    );
   });
 }

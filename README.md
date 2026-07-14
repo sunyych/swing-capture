@@ -1,4 +1,4 @@
-# SwingCapture
+# SwingCapture SSD
 
 SwingCapture 是一个围绕挥棒采集、姿态提取、网页标注和模型训练的项目。
 

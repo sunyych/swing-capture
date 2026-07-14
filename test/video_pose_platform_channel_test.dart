@@ -14,6 +14,16 @@ void main() {
     expect(picked.displayName, 'imported.mp4');
   });
 
+  test('parses video track metadata from native map', () {
+    final metadata = NativeVideoMetadataResult.fromMap({
+      'durationMs': 1800,
+      'frameRate': 59.94,
+    });
+
+    expect(metadata.durationMs, 1800);
+    expect(metadata.frameRate, 59.94);
+  });
+
   test('parses extracted pose frames from native map', () {
     final extraction = NativeVideoPoseExtractionResult.fromMap({
       'durationMs': 2000,

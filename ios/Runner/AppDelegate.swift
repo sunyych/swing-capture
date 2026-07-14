@@ -47,6 +47,10 @@ import Vision
         self?.pickVideoFromLibrary(call: call, result: result)
         return
       }
+      if call.method == "readVideoMetadata" {
+        self?.readVideoMetadata(call: call, result: result)
+        return
+      }
       if call.method == "extractPoseFramesFromVideo" {
         self?.extractPoseFramesFromVideo(call: call, result: result)
         return
@@ -422,6 +426,95 @@ import Vision
       return 0
     }
     return Int(seconds * 1000.0)
+  }
+
+  private func readVideoMetadata(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard
+      let args = call.arguments as? [String: Any],
+      let videoPath = args["videoPath"] as? String,
+      !videoPath.isEmpty
+    else {
+      result(
+        FlutterError(
+          code: "invalid_args",
+          message: "readVideoMetadata requires videoPath.",
+          details: nil
+        )
+      )
+      return
+    }
+
+    let url = URL(fileURLWithPath: videoPath)
+    let asset = AVURLAsset(url: url)
+    let frameRate = videoFrameRate(for: asset)
+    let frameRateValue: Any
+    if let frameRate {
+      frameRateValue = frameRate
+    } else {
+      frameRateValue = NSNull()
+    }
+    result([
+      "durationMs": durationMs(for: url),
+      "frameRate": frameRateValue,
+    ])
+  }
+
+  private func videoFrameRate(for asset: AVAsset) -> Double? {
+    guard let track = asset.tracks(withMediaType: .video).first else {
+      return nil
+    }
+    let nominal = Double(track.nominalFrameRate)
+    if nominal > 0 && nominal.isFinite {
+      return nominal
+    }
+    let minFrameDuration = CMTimeGetSeconds(track.minFrameDuration)
+    if minFrameDuration.isFinite && minFrameDuration > 0 {
+      return 1.0 / minFrameDuration
+    }
+    return sampleFrameRate(asset: asset, track: track)
+  }
+
+  private func sampleFrameRate(asset: AVAsset, track: AVAssetTrack) -> Double? {
+    guard
+      let reader = try? AVAssetReader(asset: asset)
+    else {
+      return nil
+    }
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    guard reader.canAdd(output) else {
+      return nil
+    }
+    reader.add(output)
+    guard reader.startReading() else {
+      return nil
+    }
+
+    var firstTime: Double?
+    var lastTime: Double?
+    var frameCount = 0
+    while frameCount < 1200, let sample = output.copyNextSampleBuffer() {
+      let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+      if time.isFinite {
+        if firstTime == nil {
+          firstTime = time
+        }
+        lastTime = time
+        frameCount += 1
+      }
+      CMSampleBufferInvalidate(sample)
+    }
+    reader.cancelReading()
+
+    guard
+      frameCount >= 2,
+      let first = firstTime,
+      let last = lastTime,
+      last > first
+    else {
+      return nil
+    }
+    return Double(frameCount - 1) / (last - first)
   }
 
   private func sanitizedFileSegment(_ value: String) -> String {

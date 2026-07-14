@@ -207,15 +207,15 @@ class CaptureController extends Notifier<CaptureSessionState> {
     _hitterFirstSeenAt = null;
   }
 
-  /// Arms the Android CameraX rolling buffer with timing + FPS mode from settings.
+  /// Arms the Android native high-speed rolling buffer.
   Future<void> startNativeRollingBuffer() async {
     final settings =
         ref.read(settingsControllerProvider).value ??
         CaptureSettings.defaults();
     await _channel.startBuffering(
-      preRollMs: (settings.preRollSeconds * 1000).round(),
-      postRollMs: (settings.postRollSeconds * 1000).round(),
-      videoFpsMode: minimumHighSpeedVideoFpsMode(
+      preRollMs: AppConstants.rollingBufferDurationMs,
+      postRollMs: 0,
+      videoFpsMode: androidRollingBufferVideoFpsMode(
         settings.videoFpsMode,
       ).wireValue,
     );
@@ -263,6 +263,9 @@ class CaptureController extends Notifier<CaptureSessionState> {
     }
     final event = _runMockActionDetection();
     final now = DateTime.now();
+    final windowStartAt = now.subtract(
+      const Duration(milliseconds: AppConstants.rollingBufferDurationMs),
+    );
     _applySwingEvent(
       event ??
           ActionEvent(
@@ -270,10 +273,10 @@ class CaptureController extends Notifier<CaptureSessionState> {
             category: _patternCategory,
             triggeredAt: now,
             score: 1,
-            preRollMs: 2000,
-            postRollMs: 2000,
-            windowStartAt: now.subtract(const Duration(seconds: 2)),
-            windowEndAt: now.add(const Duration(seconds: 2)),
+            preRollMs: AppConstants.rollingBufferDurationMs,
+            postRollMs: 0,
+            windowStartAt: windowStartAt,
+            windowEndAt: now,
             reason: 'manual trigger',
           ),
     );
@@ -432,6 +435,7 @@ class CaptureController extends Notifier<CaptureSessionState> {
     double? modelConfidence,
     TrainingLifecycleState trainingState = TrainingLifecycleState.none,
     bool savedToGallery = false,
+    double? videoFps,
   }) async {
     final repository = ref.read(historyRepositoryProvider);
     final existing = await repository.listRecords();
@@ -457,6 +461,7 @@ class CaptureController extends Notifier<CaptureSessionState> {
       createdAt: DateTime.now(),
       durationMs: durationMs,
       albumName: AppConstants.motionCaptureAlbum,
+      videoFps: videoFps,
       poseJsonPath: poseJsonPath,
       latitude: latitude,
       longitude: longitude,
@@ -565,6 +570,8 @@ class CaptureController extends Notifier<CaptureSessionState> {
     }
     final swingId = DateTime.now().microsecondsSinceEpoch.toString();
     final weight = event.score.clamp(0.0, 1.0);
+    const eventPreRollMs = AppConstants.rollingBufferDurationMs;
+    const eventPostRollMs = 0;
     _rtmpSwingEndTimer?.cancel();
     unawaited(_channel.setRtmpSwingBitrate(swingActive: true));
     unawaited(
@@ -573,12 +580,14 @@ class CaptureController extends Notifier<CaptureSessionState> {
         swingId: swingId,
         weight: weight,
         triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
-        preRollMs: event.preRollMs,
-        postRollMs: event.postRollMs,
+        preRollMs: eventPreRollMs,
+        postRollMs: eventPostRollMs,
         score: event.score,
       ),
     );
-    final endAt = event.resolvedWindowEndAt;
+    final endAt = event.triggeredAt.add(
+      const Duration(milliseconds: eventPostRollMs),
+    );
     final wait = endAt.difference(DateTime.now());
     _rtmpSwingEndTimer = Timer(wait.isNegative ? Duration.zero : wait, () {
       _rtmpSwingEndTimer = null;
@@ -588,8 +597,8 @@ class CaptureController extends Notifier<CaptureSessionState> {
           swingId: swingId,
           weight: weight,
           triggerEpochMs: event.triggeredAt.millisecondsSinceEpoch,
-          preRollMs: event.preRollMs,
-          postRollMs: event.postRollMs,
+          preRollMs: eventPreRollMs,
+          postRollMs: eventPostRollMs,
           score: event.score,
           endedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         ),
@@ -611,8 +620,8 @@ class CaptureController extends Notifier<CaptureSessionState> {
 
   void _configureActionPattern(CaptureSettings settings) {
     final cooldown = Duration(milliseconds: settings.swingCooldownMs);
-    final preRollMs = (settings.preRollSeconds * 1000).round();
-    final postRollMs = (settings.postRollSeconds * 1000).round();
+    const preRollMs = AppConstants.rollingBufferDurationMs;
+    const postRollMs = 0;
     _autoDetectionEnabled = settings.autoRecordOnReady;
     final model = CaptureModelCatalog.resolve(settings.captureModelId);
     final definition = ActionPatternCatalog.resolve(

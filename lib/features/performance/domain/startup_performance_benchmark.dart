@@ -1,15 +1,18 @@
 import '../../../core/models/action_event.dart';
 import '../../../platform_channels/capture_platform_channel.dart';
+import '../../capture/data/yolo_pose_decoder.dart';
 import '../../capture/domain/models/pose_frame.dart';
 import '../../capture/domain/patterns/action_pattern_catalog.dart';
 import '../../capture/domain/patterns/capture_model_catalog.dart';
 import '../../capture/domain/services/action_detector.dart';
 import '../../capture/domain/services/action_pattern_matcher.dart';
 import '../../capture/domain/services/lateral_burst_swing_detector.dart';
+import '../../capture/domain/services/target_pose_selector.dart';
 
 class StartupPerformanceReport {
   const StartupPerformanceReport({
     required this.recordingCapability,
+    required this.poseDetection,
     required this.poseProcessing,
     required this.elapsed,
     this.recordingError,
@@ -17,6 +20,7 @@ class StartupPerformanceReport {
 
   final NativeRecordingCapability? recordingCapability;
   final Object? recordingError;
+  final PoseDetectionBenchmarkResult poseDetection;
   final PoseProcessingBenchmarkResult poseProcessing;
   final Duration elapsed;
 
@@ -29,6 +33,24 @@ class StartupPerformanceReport {
   }
 
   String? get recordingDetail => recordingCapability?.lensSummary;
+}
+
+class PoseDetectionBenchmarkResult {
+  const PoseDetectionBenchmarkResult({
+    required this.framesProcessed,
+    required this.candidatesDetected,
+    required this.selectedFrames,
+    required this.elapsed,
+    required this.fps,
+    required this.averageCandidatesPerFrame,
+  });
+
+  final int framesProcessed;
+  final int candidatesDetected;
+  final int selectedFrames;
+  final Duration elapsed;
+  final double fps;
+  final double averageCandidatesPerFrame;
 }
 
 class PoseProcessingBenchmarkResult {
@@ -65,13 +87,57 @@ class StartupPerformanceBenchmark {
     } catch (error) {
       recordingError = error;
     }
+    final poseDetection = runPoseDetectionBenchmark();
     final poseProcessing = runPoseProcessingBenchmark();
     total.stop();
     return StartupPerformanceReport(
       recordingCapability: capability,
       recordingError: recordingError,
+      poseDetection: poseDetection,
       poseProcessing: poseProcessing,
       elapsed: total.elapsed,
+    );
+  }
+
+  PoseDetectionBenchmarkResult runPoseDetectionBenchmark() {
+    const decoder = YoloPoseDecoder();
+    final selector = TargetPoseSelector();
+    final frames = _sampleYoloPoseOutputs();
+    var framesProcessed = 0;
+    var candidatesDetected = 0;
+    var selectedFrames = 0;
+    const passes = 18;
+    final stopwatch = Stopwatch()..start();
+    for (var pass = 0; pass < passes; pass++) {
+      selector.reset();
+      for (var i = 0; i < frames.length; i++) {
+        final candidates = decoder.decode(
+          output: frames[i],
+          timestamp: DateTime(
+            2026,
+          ).add(Duration(milliseconds: (pass * frames.length + i) * 16)),
+        );
+        final selected = selector.select(candidates);
+        if (selected != null) {
+          selectedFrames += 1;
+        }
+        candidatesDetected += candidates.length;
+        framesProcessed += 1;
+      }
+    }
+    stopwatch.stop();
+    final elapsedMicros = stopwatch.elapsedMicroseconds <= 0
+        ? 1
+        : stopwatch.elapsedMicroseconds;
+    return PoseDetectionBenchmarkResult(
+      framesProcessed: framesProcessed,
+      candidatesDetected: candidatesDetected,
+      selectedFrames: selectedFrames,
+      elapsed: stopwatch.elapsed,
+      fps: framesProcessed * Duration.microsecondsPerSecond / elapsedMicros,
+      averageCandidatesPerFrame: framesProcessed == 0
+          ? 0
+          : candidatesDetected / framesProcessed,
     );
   }
 
@@ -131,6 +197,75 @@ class StartupPerformanceBenchmark {
         ),
       ),
     ];
+  }
+
+  List<Object> _sampleYoloPoseOutputs() {
+    return <Object>[
+      for (var i = 0; i < 120; i++)
+        _channelFirstYoloOutput(<List<double>>[
+          _sampleYoloPoseRow(
+            centerX: 0.50 + ((i % 9) - 4) * 0.006,
+            centerY: 0.52,
+            confidence: 0.78,
+          ),
+          _sampleYoloPoseRow(
+            centerX: 0.17,
+            centerY: 0.50 + ((i % 7) - 3) * 0.004,
+            confidence: 0.94,
+          ),
+          _sampleYoloPoseRow(
+            centerX: 0.505 + ((i % 5) - 2) * 0.003,
+            centerY: 0.522,
+            confidence: 0.56,
+          ),
+        ]),
+    ];
+  }
+
+  Object _channelFirstYoloOutput(List<List<double>> rows) {
+    return <Object>[
+      <Object>[
+        for (var attr = 0; attr < rows.first.length; attr++)
+          <double>[for (final row in rows) row[attr]],
+      ],
+    ];
+  }
+
+  List<double> _sampleYoloPoseRow({
+    required double centerX,
+    required double centerY,
+    required double confidence,
+  }) {
+    const width = 0.26;
+    const height = 0.55;
+    final row = List<double>.filled(56, 0);
+    row[0] = centerX;
+    row[1] = centerY;
+    row[2] = width;
+    row[3] = height;
+    row[4] = confidence;
+
+    void keypoint(int index, double x, double y, [double score = 0.9]) {
+      final offset = 5 + index * 3;
+      row[offset] = x.clamp(0.0, 1.0).toDouble();
+      row[offset + 1] = y.clamp(0.0, 1.0).toDouble();
+      row[offset + 2] = score;
+    }
+
+    keypoint(0, centerX, centerY - 0.24);
+    keypoint(5, centerX - 0.07, centerY - 0.13);
+    keypoint(6, centerX + 0.07, centerY - 0.13);
+    keypoint(7, centerX - 0.10, centerY - 0.03);
+    keypoint(8, centerX + 0.10, centerY - 0.03);
+    keypoint(9, centerX - 0.12, centerY + 0.07);
+    keypoint(10, centerX + 0.12, centerY + 0.07);
+    keypoint(11, centerX - 0.055, centerY + 0.10);
+    keypoint(12, centerX + 0.055, centerY + 0.10);
+    keypoint(13, centerX - 0.065, centerY + 0.23);
+    keypoint(14, centerX + 0.065, centerY + 0.23);
+    keypoint(15, centerX - 0.07, centerY + 0.31);
+    keypoint(16, centerX + 0.07, centerY + 0.31);
+    return row;
   }
 
   List<PoseFrame> _samplePoseFrames() {

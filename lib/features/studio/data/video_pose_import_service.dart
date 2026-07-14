@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../../core/models/action_event.dart';
 import '../../../core/models/capture_record.dart';
 import '../../../core/services/video_thumbnail_service.dart';
+import '../../../core/utils/formatters.dart';
 import '../../../platform_channels/capture_platform_channel.dart';
 import '../../capture/data/pose_clip_json_service.dart';
 import '../../capture/domain/models/pose_frame.dart';
@@ -54,7 +55,8 @@ class VideoPoseImportService {
     void Function(NativeVideoImportProgressEvent progress)? onProgress,
   }) async {
     final createdAt = DateTime.now();
-    final clipId = 'import_${createdAt.microsecondsSinceEpoch}';
+    final clipTimestamp = Formatters.formatFileTimestamp(createdAt);
+    final clipId = 'import_$clipTimestamp';
     final documents = await getApplicationDocumentsDirectory();
     final importDirectory = Directory('${documents.path}/imports');
     if (!await importDirectory.exists()) {
@@ -68,6 +70,7 @@ class VideoPoseImportService {
     if (picked == null || picked.videoPath.isEmpty) {
       return null;
     }
+    final metadata = await _safeReadVideoMetadata(picked.videoPath);
 
     StreamSubscription<NativeCaptureEvent>? progressSubscription;
     if (onProgress != null) {
@@ -93,7 +96,8 @@ class VideoPoseImportService {
       throw StateError('No frames were decoded from the imported video.');
     }
 
-    final durationMs = _effectiveDurationMs(picked, extraction);
+    final durationMs = _effectiveDurationMs(picked, extraction, metadata);
+    final videoFps = _validVideoFps(metadata?.frameRate);
     final clipStartAt = createdAt;
     final clipEndAt = clipStartAt.add(Duration(milliseconds: durationMs));
     final frames = _poseFramesFromNative(extraction, clipStartAt);
@@ -113,6 +117,7 @@ class VideoPoseImportService {
       clipEndAt: clipEndAt,
       event: event,
       frames: frames,
+      videoFps: videoFps,
     );
 
     SwingTfliteInferenceResult? modelResult;
@@ -128,6 +133,7 @@ class VideoPoseImportService {
         frames: frames,
         modelLabel: modelResult.label,
         modelConfidence: modelResult.confidence,
+        videoFps: videoFps,
       );
     }
 
@@ -142,6 +148,7 @@ class VideoPoseImportService {
       createdAt: createdAt,
       durationMs: durationMs,
       albumName: 'Phone Library',
+      videoFps: videoFps,
       poseJsonPath: poseJsonPath,
       reviewState: CaptureReviewState.needsReview,
       datasetState: CaptureDatasetState.extracted,
@@ -169,6 +176,7 @@ class VideoPoseImportService {
     required List<PoseFrame> frames,
     String? modelLabel,
     double? modelConfidence,
+    double? videoFps,
   }) {
     return _poseJsonService.writeClipJson(
       outputPath: outputPath,
@@ -185,21 +193,41 @@ class VideoPoseImportService {
       reviewState: CaptureReviewState.needsReview.name,
       modelLabel: modelLabel,
       modelConfidence: modelConfidence,
+      videoFps: videoFps,
     );
   }
 
   int _effectiveDurationMs(
     NativeVideoPickResult picked,
     NativeVideoPoseExtractionResult extraction,
+    NativeVideoMetadataResult? metadata,
   ) {
     final candidates = [
       picked.durationMs,
       extraction.durationMs,
+      metadata?.durationMs ?? 0,
     ].where((value) => value > 0).toList(growable: false);
     if (candidates.isEmpty) {
       return extraction.frames.last.offsetMs;
     }
     return candidates.reduce(math.max).toInt();
+  }
+
+  Future<NativeVideoMetadataResult?> _safeReadVideoMetadata(
+    String videoPath,
+  ) async {
+    try {
+      return _channel.readVideoMetadata(videoPath);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  double? _validVideoFps(double? fps) {
+    if (fps == null || fps <= 0 || fps.isNaN || fps.isInfinite) {
+      return null;
+    }
+    return fps;
   }
 
   ActionEvent _importEvent({

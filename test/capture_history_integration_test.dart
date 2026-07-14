@@ -61,11 +61,13 @@ void main() {
       durationMs: 1800,
       thumbnailPath: '/tmp/test-swing.jpg',
       locationLabel: 'San Diego, CA',
+      videoFps: 59.94,
     );
 
     final items = await container.read(historyControllerProvider.future);
     expect(items, hasLength(1));
     expect(items.first.record.videoPath, '/tmp/test-swing.mp4');
+    expect(items.first.record.videoFps, 59.94);
     expect(items.first.subtitle, 'San Diego, CA');
   });
 

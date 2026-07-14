@@ -21,6 +21,7 @@ import '../../../../core/models/capture_settings.dart';
 import '../../../../core/models/detection_state.dart';
 import '../../../../core/services/location_metadata_service.dart';
 import '../../../../core/services/video_thumbnail_service.dart';
+import '../../../../core/utils/formatters.dart';
 import '../../data/pose_clip_json_service.dart';
 import '../../data/pose_detection_service.dart';
 import '../../domain/models/dual_camera_sync.dart';
@@ -83,10 +84,32 @@ class _CapturePageState extends ConsumerState<CapturePage>
   double? _maxZoom;
   double? _zoom;
   double? _scaleGestureStartZoom;
+  double? _lastBufferTargetFps;
+  int? _lastBufferProfileWidth;
+  int? _lastBufferProfileHeight;
+  int? _lastBufferFrameCapacity;
+  int? _lastBufferDurationMs;
+  int? _lastBufferedFrameCount;
+  int? _lastBufferedDurationMs;
+  int? _lastBufferedBytes;
+  double? _lastBufferAchievedFps;
+  String? _lastBufferFallbackStatus;
+  bool _lastBufferSegmentRecording = false;
+  bool _lastBufferSegmentStarting = false;
   String _nativeLensDirection = 'back';
   bool _nativePreviewReady = false;
+  bool _nativeHighSpeedUnavailable = false;
+  bool _startupBufferStartInFlight = false;
   DateTime? _lastNativePoseHandledAt;
+  Completer<bool>? _nativeBufferStartCompleter;
   final List<PoseFrame> _poseFrameBuffer = <PoseFrame>[];
+
+  static const Set<String> _nativeHighSpeedStopCodes = <String>{
+    'high_speed_required_unavailable',
+    'high_speed_capture_failed',
+  };
+  static const String _nativeHighSpeedUnavailableMessage =
+      'High-speed rolling buffer is unavailable on this lens.';
 
   static const EventChannel _volumeKeyChannel = EventChannel(
     'swingcapture/volume_keys',
@@ -155,17 +178,41 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .setLastMessage('Dataset session finished ($count clips).');
   }
 
-  Future<void> _ensureNativeRollingBufferArmed() async {
+  Future<bool> _ensureNativeRollingBufferArmed() async {
     if (!_useNativeCapturePipeline) {
-      return;
+      return false;
     }
     if (_isCaptureLocked()) {
-      return;
+      return false;
+    }
+    if (_nativeHighSpeedUnavailable) {
+      return false;
     }
     if (ref.read(captureControllerProvider).isRecording) {
-      return;
+      return true;
     }
     await _startNativeRollingBuffer();
+    return ref.read(captureControllerProvider).isRecording;
+  }
+
+  Future<void> _startRollingBufferOnLaunch() async {
+    if (!_useNativeCapturePipeline ||
+        !mounted ||
+        _startupBufferStartInFlight ||
+        !_nativePreviewReady ||
+        _nativeHighSpeedUnavailable) {
+      return;
+    }
+    final state = ref.read(captureControllerProvider);
+    if (!state.hasCameraPermission || !state.isRunning || state.isRecording) {
+      return;
+    }
+    _startupBufferStartInFlight = true;
+    try {
+      await _startNativeRollingBuffer();
+    } finally {
+      _startupBufferStartInFlight = false;
+    }
   }
 
   ActionEvent _fallbackSwingEvent([DateTime? triggeredAt]) {
@@ -177,13 +224,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
     );
     final pattern = ActionPatternCatalog.resolve(
       actionPatternId,
-      preRollMs: (settings.preRollSeconds * 1000).round(),
-      postRollMs: (settings.postRollSeconds * 1000).round(),
+      preRollMs: AppConstants.rollingBufferDurationMs,
+      postRollMs: 0,
       cooldownMs: settings.swingCooldownMs,
     );
     final resolvedTriggeredAt = triggeredAt ?? DateTime.now();
-    final preRollMs = (settings.preRollSeconds * 1000).round();
-    final postRollMs = (settings.postRollSeconds * 1000).round();
+    const preRollMs = AppConstants.rollingBufferDurationMs;
+    const postRollMs = 0;
     return ActionEvent(
       label: pattern.label,
       category: pattern.category,
@@ -199,25 +246,16 @@ class _CapturePageState extends ConsumerState<CapturePage>
     );
   }
 
-  int _eventPreRollMs(ActionEvent event) {
-    return event.triggeredAt
-        .difference(event.resolvedWindowStartAt)
-        .inMilliseconds
-        .clamp(0, 60000);
+  int _eventPreRollMs(ActionEvent _) {
+    return AppConstants.rollingBufferDurationMs;
   }
 
-  int _eventPostRollMs(ActionEvent event) {
-    return event.resolvedWindowEndAt
-        .difference(event.triggeredAt)
-        .inMilliseconds
-        .clamp(0, 60000);
+  int _eventPostRollMs(ActionEvent _) {
+    return 0;
   }
 
-  int _eventWindowDurationMs(ActionEvent event) {
-    return event.resolvedWindowEndAt
-        .difference(event.resolvedWindowStartAt)
-        .inMilliseconds
-        .clamp(0, 60000);
+  int _eventWindowDurationMs(ActionEvent _) {
+    return AppConstants.rollingBufferDurationMs;
   }
 
   Duration _captureCooldownDuration() {
@@ -342,6 +380,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     _remoteSwingTriggerSubscription?.cancel();
     _remoteDualCameraClipSubscription?.cancel();
     _nativeCaptureSubscription?.cancel();
+    _completeNativeBufferStart(false);
     _nativeCaptureSubscription = null;
     _volumeKeySubscription = null;
     if (Platform.isAndroid) {
@@ -375,6 +414,14 @@ class _CapturePageState extends ConsumerState<CapturePage>
     unawaited(_triggerSwingEvent());
   }
 
+  void _completeNativeBufferStart(bool started) {
+    final completer = _nativeBufferStartCompleter;
+    _nativeBufferStartCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(started);
+    }
+  }
+
   void _onNativeCaptureEvent(NativeCaptureEvent event) {
     if (!mounted) {
       return;
@@ -392,16 +439,69 @@ class _CapturePageState extends ConsumerState<CapturePage>
         unawaited(_forwardPoseFrame(_poseFrameFromNativeEvent(event)));
       case NativeCameraStateEvent():
         setState(() {
+          if (event.lensDirection != _nativeLensDirection) {
+            _nativeHighSpeedUnavailable = false;
+          }
           _nativeLensDirection = event.lensDirection;
           _minZoom = event.minZoom;
           _maxZoom = event.maxZoom;
           _zoom = event.zoom.clamp(event.minZoom, event.maxZoom);
           _nativePreviewReady = true;
         });
+        unawaited(_startRollingBufferOnLaunch());
       case NativeBufferStateEvent():
-        ref
-            .read(captureControllerProvider.notifier)
-            .setBufferingActive(event.isBuffering);
+        final wasRecording = ref.read(captureControllerProvider).isRecording;
+        setState(() {
+          if (event.isBuffering && event.highSpeed == true) {
+            _nativeHighSpeedUnavailable = false;
+          }
+          _lastBufferTargetFps = event.targetFps;
+          _lastBufferProfileWidth = event.profileWidth;
+          _lastBufferProfileHeight = event.profileHeight;
+          _lastBufferFrameCapacity = event.queueFrameCapacity;
+          _lastBufferDurationMs = event.queueDurationMs;
+          _lastBufferedFrameCount = event.bufferedFrameCount;
+          _lastBufferedDurationMs = event.bufferedDurationMs;
+          _lastBufferedBytes = event.bufferedBytes;
+          _lastBufferAchievedFps = event.achievedFps;
+          _lastBufferSegmentRecording = event.segmentRecording;
+          _lastBufferSegmentStarting = event.segmentStarting;
+        });
+        final notifier = ref.read(captureControllerProvider.notifier);
+        if (event.segmentRecording) {
+          _recordingStartedAt ??= DateTime.now();
+          if (!wasRecording) {
+            notifier.setRecording(true);
+          }
+          notifier.setBufferingActive(
+            true,
+            lastMessage: wasRecording ? null : 'Native rolling buffer started.',
+          );
+          _completeNativeBufferStart(true);
+        } else if (!event.isBuffering) {
+          _recordingStartedAt = null;
+          if (wasRecording) {
+            notifier.setRecording(false);
+          }
+          notifier.setBufferingActive(false);
+          _completeNativeBufferStart(false);
+        } else if (event.segmentStarting) {
+          if (wasRecording) {
+            notifier.setRecording(false);
+          }
+          notifier.setBufferingActive(
+            true,
+            lastMessage: 'Starting native rolling buffer...',
+          );
+        } else {
+          if (wasRecording) {
+            notifier.setRecording(false);
+          }
+          notifier.setBufferingActive(
+            true,
+            lastMessage: 'Rolling buffer is waiting for a camera segment.',
+          );
+        }
       case NativeRtmpStateEvent():
         if (event.state == 'error' && (event.message?.isNotEmpty ?? false)) {
           ref
@@ -413,9 +513,70 @@ class _CapturePageState extends ConsumerState<CapturePage>
           '[CapturePage] native capture error '
           'code=${event.code} message=${event.message}',
         );
+        if (_nativeHighSpeedStopCodes.contains(event.code)) {
+          _autoStopTimer?.cancel();
+          _pendingSwingEvent = null;
+          _pendingClipIdOverride = null;
+          _isFinalizingBufferedClip = false;
+          if (mounted) {
+            setState(() => _nativeHighSpeedUnavailable = true);
+          } else {
+            _nativeHighSpeedUnavailable = true;
+          }
+          final notifier = ref.read(captureControllerProvider.notifier);
+          notifier.setRecording(false);
+          notifier.setBufferingActive(false);
+        }
+        _lastBufferSegmentRecording = false;
+        _lastBufferSegmentStarting = false;
+        _completeNativeBufferStart(false);
         ref
             .read(captureControllerProvider.notifier)
             .setLastMessage(event.message);
+      case NativeHighSpeedEvent():
+        final notifier = ref.read(captureControllerProvider.notifier);
+        switch (event.name) {
+          case 'CameraReady':
+            setState(() => _nativePreviewReady = true);
+          case 'CaptureStarted':
+            setState(() {
+              _nativePreviewReady = true;
+              _lastBufferTargetFps = (event.payload['fps'] as num?)?.toDouble();
+              _lastBufferSegmentRecording = true;
+              _lastBufferSegmentStarting = false;
+              _lastBufferFallbackStatus = null;
+            });
+            _recordingStartedAt ??= DateTime.now();
+            notifier.setRecording(true);
+            notifier.setBufferingActive(
+              true,
+              lastMessage: 'Native high-speed capture started.',
+            );
+          case 'CaptureStopped':
+            setState(() {
+              _lastBufferSegmentRecording = false;
+              _lastBufferSegmentStarting = false;
+            });
+            _recordingStartedAt = null;
+            notifier.setRecording(false);
+            notifier.setBufferingActive(false);
+          case 'ClipSaved':
+            notifier.setLastMessage('Swing clip saved.');
+          case 'MotionDetected':
+            break;
+          case 'ProfileFallback':
+            final from = event.payload['from'] as String? ?? 'profile';
+            final to = event.payload['to'] as String? ?? 'fallback';
+            final skipped =
+                (event.payload['skippedUnavailable'] as List<Object?>?)
+                    ?.whereType<String>()
+                    .join(', ');
+            final status = skipped == null || skipped.isEmpty
+                ? '$from failed, using $to'
+                : '$from failed, $skipped unavailable, using $to';
+            setState(() => _lastBufferFallbackStatus = status);
+            notifier.setLastMessage(status);
+        }
       case NativeVideoImportProgressEvent():
         break;
       case NativeCaptureUnknownEvent():
@@ -508,6 +669,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     }
     if (ref.read(captureControllerProvider).isRunning) {
       await WakelockPlus.enable();
+      await _startRollingBufferOnLaunch();
     }
   }
 
@@ -519,7 +681,6 @@ class _CapturePageState extends ConsumerState<CapturePage>
     setState(() => _isOpeningCamera = true);
     try {
       await ref.read(captureControllerProvider.notifier).startSession();
-      await _ensureNativeRollingBufferArmed();
     } catch (_) {
       if (mounted) {
         ref
@@ -536,6 +697,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     }
     if (ref.read(captureControllerProvider).isRunning) {
       await WakelockPlus.enable();
+      await _startRollingBufferOnLaunch();
     }
   }
 
@@ -592,7 +754,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         try {
           await ref.read(captureControllerProvider.notifier).startSession();
           await _applyRecorderOnlyDetectionMode(settings);
-          await _ensureNativeRollingBufferArmed();
+          await _startRollingBufferOnLaunch();
         } finally {
           if (mounted) {
             setState(() => _isOpeningCamera = false);
@@ -621,14 +783,11 @@ class _CapturePageState extends ConsumerState<CapturePage>
         _selectedCameraIndex = 0;
       }
 
-      // Native Android pipeline can keep preview, pose detection, and the
-      // rolling buffer alive together, so arm it immediately when Capture opens.
       await _openSelectedCamera();
       await ref.read(captureControllerProvider.notifier).startSession();
       if (!_isRecorderOnlyRole) {
         await _startPoseStreamIfNeeded();
       }
-      await _ensureNativeRollingBufferArmed();
     } catch (_) {
       ref
           .read(captureControllerProvider.notifier)
@@ -779,6 +938,68 @@ class _CapturePageState extends ConsumerState<CapturePage>
         settings.videoFpsMode.nominalTargetFps;
   }
 
+  String _videoFpsLabel(CaptureSettings settings) {
+    final fps =
+        _lastBufferAchievedFps ??
+        _lastBufferTargetFps ??
+        minimumHighSpeedVideoFpsMode(
+          settings.videoFpsMode,
+        ).nominalTargetFps.toDouble();
+    final width = _lastBufferProfileWidth;
+    final height = _lastBufferProfileHeight;
+    if (width != null && width > 0 && height != null && height > 0) {
+      return '${width}x$height ${_formatFps(fps)}fps';
+    }
+    return '${_formatFps(fps)}fps';
+  }
+
+  String _videoFpsDetail(CaptureSettings settings) {
+    final fallbackStatus = _lastBufferFallbackStatus;
+    if (fallbackStatus != null) {
+      return fallbackStatus;
+    }
+    final frames = _lastBufferedFrameCount ?? _lastBufferFrameCapacity;
+    final durationMs =
+        _lastBufferedDurationMs ??
+        _lastBufferDurationMs ??
+        AppConstants.rollingBufferDurationMs;
+    final seconds = durationMs / 1000;
+    final secondsLabel = seconds == seconds.roundToDouble()
+        ? seconds.toStringAsFixed(0)
+        : seconds.toStringAsFixed(1);
+    final bytes = _lastBufferedBytes;
+    final sizeLabel = bytes != null && bytes > 0
+        ? ' / ${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+        : '';
+    if (frames != null && frames > 0) {
+      return 'Buffer $frames frames / ${secondsLabel}s$sizeLabel';
+    }
+    return 'Buffer ${secondsLabel}s';
+  }
+
+  String _formatFps(num fps) {
+    final value = fps.toDouble();
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(1);
+  }
+
+  Future<double?> _readSavedVideoFps(String videoPath) async {
+    try {
+      final metadata = await _capturePlatformChannel.readVideoMetadata(
+        videoPath,
+      );
+      final fps = metadata?.frameRate;
+      if (fps == null || fps <= 0 || fps.isNaN || fps.isInfinite) {
+        return null;
+      }
+      return fps;
+    } catch (_) {
+      return null;
+    }
+  }
+
   List<int?> _peerRecordingMaxFps(DualCameraRole role) {
     final expectedPeerRole = switch (role) {
       DualCameraRole.detector => DualCameraRole.recorder,
@@ -839,24 +1060,119 @@ class _CapturePageState extends ConsumerState<CapturePage>
     } catch (_) {}
   }
 
-  Future<void> _startNativeRollingBuffer() async {
+  Future<bool> _startNativeRollingBuffer({
+    bool waitForRecordingSegment = false,
+    bool allowRetryWhenUnavailable = false,
+  }) async {
     if (_isCaptureLocked()) {
       ref
           .read(captureControllerProvider.notifier)
           .setLastMessage(_captureCooldownMessage());
-      return;
+      return false;
     }
-    await ref
-        .read(captureControllerProvider.notifier)
-        .startNativeRollingBuffer();
-    _recordingStartedAt ??= DateTime.now();
-    ref.read(captureControllerProvider.notifier).setRecording(true);
+    if (_nativeHighSpeedUnavailable) {
+      if (allowRetryWhenUnavailable) {
+        if (mounted) {
+          setState(() => _nativeHighSpeedUnavailable = false);
+        } else {
+          _nativeHighSpeedUnavailable = false;
+        }
+        _lastBufferSegmentRecording = false;
+        _lastBufferSegmentStarting = false;
+      } else {
+        ref
+            .read(captureControllerProvider.notifier)
+            .setLastMessage(_nativeHighSpeedUnavailableMessage);
+        return false;
+      }
+    }
+    if (_lastBufferSegmentRecording) {
+      _recordingStartedAt ??= DateTime.now();
+      ref.read(captureControllerProvider.notifier).setRecording(true);
+      _completeNativeBufferStart(true);
+      return true;
+    }
+    if (_lastBufferSegmentStarting) {
+      if (!waitForRecordingSegment) {
+        ref
+            .read(captureControllerProvider.notifier)
+            .setBufferingActive(
+              true,
+              lastMessage: 'Starting native rolling buffer...',
+            );
+        return true;
+      }
+      _completeNativeBufferStart(false);
+      final pendingStartCompleter = Completer<bool>();
+      _nativeBufferStartCompleter = pendingStartCompleter;
+      final started = await pendingStartCompleter.future.timeout(
+        const Duration(seconds: 7),
+        onTimeout: () => false,
+      );
+      if (!started && mounted) {
+        ref
+            .read(captureControllerProvider.notifier)
+            .setLastMessage('Native rolling buffer is still starting.');
+      }
+      return started;
+    }
+    Completer<bool>? startCompleter;
+    if (waitForRecordingSegment && !_lastBufferSegmentRecording) {
+      _completeNativeBufferStart(false);
+      startCompleter = Completer<bool>();
+      _nativeBufferStartCompleter = startCompleter;
+    }
+    if (mounted) {
+      setState(() => _lastBufferFallbackStatus = null);
+    } else {
+      _lastBufferFallbackStatus = null;
+    }
+    try {
+      await ref
+          .read(captureControllerProvider.notifier)
+          .startNativeRollingBuffer();
+    } on PlatformException catch (error) {
+      _completeNativeBufferStart(false);
+      ref.read(captureControllerProvider.notifier).setRecording(false);
+      ref
+          .read(captureControllerProvider.notifier)
+          .setBufferingActive(
+            false,
+            lastMessage: error.message ?? 'Native rolling buffer failed.',
+          );
+      return false;
+    }
     ref
         .read(captureControllerProvider.notifier)
         .setBufferingActive(
           true,
-          lastMessage: 'Native rolling buffer started.',
+          lastMessage: _lastBufferSegmentRecording
+              ? 'Native rolling buffer started.'
+              : 'Starting native rolling buffer...',
         );
+    if (_lastBufferSegmentRecording) {
+      _recordingStartedAt ??= DateTime.now();
+      ref.read(captureControllerProvider.notifier).setRecording(true);
+      _completeNativeBufferStart(true);
+      return true;
+    }
+    if (startCompleter == null) {
+      return true;
+    }
+    final started = await startCompleter.future.timeout(
+      const Duration(seconds: 7),
+      onTimeout: () => false,
+    );
+    if (!started && mounted) {
+      ref
+          .read(captureControllerProvider.notifier)
+          .setLastMessage(
+            _lastBufferSegmentStarting
+                ? 'Native rolling buffer is still starting.'
+                : 'Native rolling buffer did not start a camera segment yet.',
+          );
+    }
+    return started;
   }
 
   Future<void> _stopNativeRollingBuffer() async {
@@ -865,6 +1181,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
     _recordingStartedAt = null;
     _pendingSwingEvent = null;
     _pendingClipIdOverride = null;
+    _lastBufferSegmentRecording = false;
+    _lastBufferSegmentStarting = false;
+    _completeNativeBufferStart(false);
     ref.read(captureControllerProvider.notifier).setRecording(false);
     ref
         .read(captureControllerProvider.notifier)
@@ -921,13 +1240,19 @@ class _CapturePageState extends ConsumerState<CapturePage>
         location = null;
       }
 
+      final clipEndAt = event.triggeredAt;
+      final clipStartAt = clipEndAt.subtract(
+        const Duration(milliseconds: AppConstants.rollingBufferDurationMs),
+      );
       final durationMs = _eventWindowDurationMs(event);
+      final videoFps = await _readSavedVideoFps(finalPath);
       final poseJsonPath = await _savePoseJsonForClip(
         clipId: clipId,
         videoPath: finalPath,
         event: event,
-        clipStartAt: event.resolvedWindowStartAt,
-        clipEndAt: event.resolvedWindowEndAt,
+        clipStartAt: clipStartAt,
+        clipEndAt: clipEndAt,
+        videoFps: videoFps,
       );
       await ref
           .read(captureControllerProvider.notifier)
@@ -947,6 +1272,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
             modelLabel: event.label,
             modelConfidence: event.score,
             savedToGallery: false,
+            videoFps: videoFps,
           );
       if (_sessionActive) {
         setState(() => _sessionClipCount++);
@@ -958,6 +1284,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         durationMs: durationMs,
         thumbnailPath: thumbnailPath,
         poseJsonPath: poseJsonPath,
+        videoFps: videoFps,
       );
 
       final settings =
@@ -1268,7 +1595,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
       try {
         await _capturePlatformChannel.setZoomRatio(clamped);
         if (mounted) {
-          setState(() => _zoom = clamped);
+          setState(() {
+            _zoom = clamped;
+            _nativeHighSpeedUnavailable = false;
+          });
         }
       } catch (_) {}
       return;
@@ -1430,7 +1760,12 @@ class _CapturePageState extends ConsumerState<CapturePage>
       }
       _pendingSwingEvent = event;
       _autoStartedRecording = true;
-      await _startNativeRollingBuffer();
+      final started = await _startNativeRollingBuffer(
+        waitForRecordingSegment: true,
+      );
+      if (!started) {
+        return;
+      }
       _scheduleAutoFinalize(event);
       ref
           .read(captureControllerProvider.notifier)
@@ -1480,7 +1815,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   void _scheduleAutoFinalize(ActionEvent event) {
     _autoStopTimer?.cancel();
-    final remaining = event.resolvedWindowEndAt.difference(DateTime.now());
+    final windowEndAt = event.triggeredAt.add(
+      Duration(milliseconds: _eventPostRollMs(event)),
+    );
+    final remaining = windowEndAt.difference(DateTime.now());
     final wait = remaining.isNegative
         ? const Duration(milliseconds: 50)
         : remaining;
@@ -1509,7 +1847,6 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
     final event = _fallbackSwingEvent();
     final clipId = DateTime.now().microsecondsSinceEpoch.toString();
-    _armCaptureLock(event);
     if (_useNativeCapturePipeline) {
       final captureState = ref.read(captureControllerProvider);
       if (!captureState.isRunning) {
@@ -1518,7 +1855,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
           return;
         }
       }
-      await _ensureNativeRollingBufferArmed();
+      if (!await _ensureNativeRollingBufferArmed()) {
+        return;
+      }
+      _armCaptureLock(event);
       _pendingClipIdOverride = clipId;
       _pendingSwingEvent = event;
       unawaited(_broadcastDualCameraTrigger(event, swingId: clipId));
@@ -1537,6 +1877,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       return;
     }
 
+    _armCaptureLock(event);
     if (!_isCameraReady) {
       await _toggleSession();
       if (!_isCameraReady) {
@@ -1628,15 +1969,19 @@ class _CapturePageState extends ConsumerState<CapturePage>
         return;
       }
     }
+    if (_useNativeCapturePipeline) {
+      if (!await _ensureNativeRollingBufferArmed()) {
+        return;
+      }
+    } else if (!ref.read(captureControllerProvider).isRecording) {
+      await _startManualPreRollBuffer();
+      if (!ref.read(captureControllerProvider).isRecording) {
+        return;
+      }
+    }
     _pendingSwingEvent = event;
     _pendingClipIdOverride = trigger.swingId;
     _armCaptureLock(event, rearmBufferAfterCooldown: true);
-
-    if (_useNativeCapturePipeline) {
-      await _ensureNativeRollingBufferArmed();
-    } else if (!ref.read(captureControllerProvider).isRecording) {
-      await _startManualPreRollBuffer();
-    }
     ref
         .read(captureControllerProvider.notifier)
         .setBufferingActive(
@@ -1668,6 +2013,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     required int durationMs,
     String? thumbnailPath,
     String? poseJsonPath,
+    double? videoFps,
   }) async {
     final settings = _settingsOrDefaults();
     if (settings.dualCameraRole == DualCameraRole.recorder) {
@@ -1702,6 +2048,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       durationMs: durationMs,
       thumbnailPath: thumbnailPath ?? '',
       poseJsonPath: poseJsonPath,
+      videoFps: videoFps,
     );
     await _tryBuildDualCameraMkv(clipId);
   }
@@ -1766,6 +2113,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
       _dualCameraMkvCompleted.add(swingId);
       _localDualCameraClips.remove(swingId);
       _remoteDualCameraClips.remove(swingId);
+      final videoFps =
+          await _readSavedVideoFps(result.outputPath) ?? local.videoFps;
       await ref
           .read(captureControllerProvider.notifier)
           .saveManualCapture(
@@ -1780,6 +2129,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
             modelLabel: 'dual_camera_${local.event.label}',
             modelConfidence: local.event.score,
             savedToGallery: false,
+            videoFps: videoFps,
           );
       ref
           .read(captureControllerProvider.notifier)
@@ -1833,8 +2183,12 @@ class _CapturePageState extends ConsumerState<CapturePage>
         } else if (_autoDetectionEnabled(settings)) {
           unawaited(() async {
             _autoStartedRecording = true;
-            await _startNativeRollingBuffer();
-            if (mounted && ref.read(captureControllerProvider).isRecording) {
+            final started = await _startNativeRollingBuffer(
+              waitForRecordingSegment: true,
+            );
+            if (started &&
+                mounted &&
+                ref.read(captureControllerProvider).isRecording) {
               _scheduleAutoFinalize(_pendingSwingEvent!);
             }
           }());
@@ -1892,7 +2246,6 @@ class _CapturePageState extends ConsumerState<CapturePage>
       }
 
       await captureNotifier.startSession();
-      await _ensureNativeRollingBufferArmed();
       return;
     }
 
@@ -1934,7 +2287,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
       if (ref.read(captureControllerProvider).isRecording) {
         await _stopNativeRollingBuffer();
       } else {
-        await _startNativeRollingBuffer();
+        await _startNativeRollingBuffer(
+          waitForRecordingSegment: true,
+          allowRetryWhenUnavailable: true,
+        );
       }
       return;
     }
@@ -2106,12 +2462,14 @@ class _CapturePageState extends ConsumerState<CapturePage>
       location = null;
     }
 
+    final videoFps = await _readSavedVideoFps(trimmedPath);
     final poseJsonPath = await _savePoseJsonForClip(
       clipId: clipId,
       videoPath: trimmedPath,
       event: event,
       clipStartAt: clipWindow.startAt,
       clipEndAt: clipWindow.endAt,
+      videoFps: videoFps,
     );
 
     await ref
@@ -2130,6 +2488,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           modelLabel: event.label,
           modelConfidence: event.score,
           savedToGallery: false,
+          videoFps: videoFps,
         );
     if (_sessionActive) {
       setState(() => _sessionClipCount++);
@@ -2141,6 +2500,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       durationMs: clipDurationMs,
       thumbnailPath: thumbnailPath,
       poseJsonPath: poseJsonPath,
+      videoFps: videoFps,
     );
 
     final savedToGallery = await _maybeSaveToGallery(trimmedPath);
@@ -2248,7 +2608,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
         final response = await _capturePlatformChannel.switchCamera();
         final lensDirection = response?['lensDirection'] as String?;
         if (lensDirection != null && mounted) {
-          setState(() => _nativeLensDirection = lensDirection);
+          setState(() {
+            _nativeLensDirection = lensDirection;
+            _nativeHighSpeedUnavailable = false;
+          });
         }
       } on MissingPluginException {
         // Ignore on older builds.
@@ -2304,7 +2667,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     }
 
     final targetPath =
-        '${clipsDirectory.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+        '${clipsDirectory.path}/${prefix}_${_readableClipTimestamp()}.mp4';
     final sourceFile = File(sourcePath);
 
     try {
@@ -2322,7 +2685,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!await clipsDirectory.exists()) {
       await clipsDirectory.create(recursive: true);
     }
-    return '${clipsDirectory.path}/swing_$clipId.mp4';
+    return '${clipsDirectory.path}/swing_${_readableClipTimestamp(clipId)}.mp4';
   }
 
   Future<String> _buildDualCameraMkvPath(String clipId) async {
@@ -2331,7 +2694,30 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (!await clipsDirectory.exists()) {
       await clipsDirectory.create(recursive: true);
     }
-    return '${clipsDirectory.path}/dual_swing_$clipId.mkv';
+    return '${clipsDirectory.path}/dual_swing_${_readableClipTimestamp(clipId)}.mkv';
+  }
+
+  String _readableClipTimestamp([String? clipId]) {
+    return Formatters.formatFileTimestamp(
+      _timestampDateTimeFromClipId(clipId) ?? DateTime.now(),
+    );
+  }
+
+  DateTime? _timestampDateTimeFromClipId(String? clipId) {
+    if (clipId == null || clipId.isEmpty) {
+      return null;
+    }
+    final timestamp = int.tryParse(clipId);
+    if (timestamp == null || timestamp <= 0) {
+      return null;
+    }
+    if (timestamp >= 100000000000000) {
+      return DateTime.fromMicrosecondsSinceEpoch(timestamp);
+    }
+    if (timestamp >= 100000000000) {
+      return DateTime.fromMillisecondsSinceEpoch(timestamp);
+    }
+    return null;
   }
 
   Future<Directory> _dualCameraIncomingClipDirectory() async {
@@ -2402,6 +2788,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     required ActionEvent event,
     required DateTime clipStartAt,
     required DateTime clipEndAt,
+    double? videoFps,
   }) async {
     final clipFrames = _poseFramesForWindow(clipStartAt, clipEndAt);
     final outputPath = _buildPoseJsonPath(videoPath);
@@ -2423,6 +2810,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         reviewState: CaptureReviewState.unreviewed.name,
         modelLabel: event.label,
         modelConfidence: event.score,
+        videoFps: videoFps,
       );
     } catch (_) {
       return null;
@@ -2895,6 +3283,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
   Widget build(BuildContext context) {
     final state = ref.watch(captureControllerProvider);
     final settingsValue = ref.watch(settingsControllerProvider).value;
+    final effectiveSettings = settingsValue ?? CaptureSettings.defaults();
+    final showCaptureDot =
+        state.isRecording &&
+        (_pendingSwingEvent != null ||
+            _isFinalizingBufferedClip ||
+            state.detectionState.stage == DetectionStage.swingDetected ||
+            state.detectionState.stage == DetectionStage.saving);
     if (settingsValue != null) {
       _queueApplyDualCameraSettings(settingsValue);
     }
@@ -2919,6 +3314,9 @@ class _CapturePageState extends ConsumerState<CapturePage>
       }
       if (prev.videoFpsMode == curr.videoFpsMode) {
         return;
+      }
+      if (_useNativeCapturePipeline && _nativeHighSpeedUnavailable && mounted) {
+        setState(() => _nativeHighSpeedUnavailable = false);
       }
       if (_useNativeCapturePipeline) {
         final recording = ref.read(captureControllerProvider).isRecording;
@@ -3005,9 +3403,18 @@ class _CapturePageState extends ConsumerState<CapturePage>
               if (state.isRecording)
                 const Positioned(
                   top: 16,
-                  right: 128,
+                  left: 16,
                   child: _RecordingIndicator(),
                 ),
+              Positioned(
+                left: 16,
+                right: 108,
+                bottom: 16,
+                child: _VideoFpsReadout(
+                  label: _videoFpsLabel(effectiveSettings),
+                  detail: _videoFpsDetail(effectiveSettings),
+                ),
+              ),
               Positioned(
                 right: 16,
                 bottom: 16,
@@ -3022,6 +3429,12 @@ class _CapturePageState extends ConsumerState<CapturePage>
                       : _startDatasetSession,
                 ),
               ),
+              if (showCaptureDot)
+                const Positioned(
+                  left: 16,
+                  bottom: 76,
+                  child: _CaptureActiveDot(),
+                ),
             ],
           ),
         ),
@@ -3378,6 +3791,84 @@ class _CaptureControlsOverlay extends StatelessWidget {
   }
 }
 
+class _VideoFpsReadout extends StatelessWidget {
+  const _VideoFpsReadout({required this.label, required this.detail});
+
+  final String label;
+  final String detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Tooltip(
+      message: detail,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.42),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              const Icon(Icons.speed, size: 16, color: Colors.cyanAccent),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: textTheme.labelMedium?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  detail,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: textTheme.labelSmall?.copyWith(color: Colors.white70),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CaptureActiveDot extends StatelessWidget {
+  const _CaptureActiveDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: const Padding(
+        padding: EdgeInsets.all(7),
+        child: SizedBox(
+          width: 12,
+          height: 12,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Color(0xFFEF4444),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _PosePainter extends CustomPainter {
   _PosePainter(this.points, {this.sourceAspectRatio})
     : _byName = {
@@ -3542,6 +4033,7 @@ class _LocalDualCameraClip {
     required this.durationMs,
     required this.thumbnailPath,
     this.poseJsonPath,
+    this.videoFps,
   });
 
   final String swingId;
@@ -3550,6 +4042,7 @@ class _LocalDualCameraClip {
   final int durationMs;
   final String thumbnailPath;
   final String? poseJsonPath;
+  final double? videoFps;
 }
 
 class _PendingDualCameraClipUpload {

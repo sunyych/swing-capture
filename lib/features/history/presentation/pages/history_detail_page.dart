@@ -9,6 +9,7 @@ import '../../../../app/providers.dart';
 import '../../../../core/config/app_constants.dart';
 import '../../../../core/models/capture_record.dart';
 import '../../../../core/utils/formatters.dart';
+import '../../../../platform_channels/capture_platform_channel.dart';
 import '../../domain/services/swing_tflite_inference_service.dart';
 
 class HistoryDetailPage extends ConsumerStatefulWidget {
@@ -32,6 +33,8 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   late int _currentIndex;
   VideoPlayerController? _videoController;
   int _videoLoadToken = 0;
+  static const CapturePlatformChannel _capturePlatformChannel =
+      CapturePlatformChannel();
   final SwingTfliteInferenceService _inferenceService =
       SwingTfliteInferenceService();
   SwingTfliteInferenceResult? _inferenceResult;
@@ -42,6 +45,15 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   CaptureRecord get _currentRecord => _records[_currentIndex];
   bool get _hasPrevious => _currentIndex > 0;
   bool get _hasNext => _currentIndex < _records.length - 1;
+
+  String _displayFileName(String path) {
+    if (path.isEmpty) {
+      return 'Unavailable';
+    }
+    final normalized = path.replaceAll(r'\', '/');
+    final segments = normalized.split('/').where((value) => value.isNotEmpty);
+    return segments.isEmpty ? path : segments.last;
+  }
 
   @override
   void initState() {
@@ -59,7 +71,8 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
             preferredIndex < _records.length
         ? preferredIndex
         : (indexedRecord >= 0 ? indexedRecord : 0);
-    _initializeVideo();
+    unawaited(_initializeVideo());
+    unawaited(_loadMissingVideoFps());
   }
 
   @override
@@ -118,8 +131,44 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
     }
     final shouldContinuePlayback = _videoController?.value.isPlaying ?? false;
     setState(() => _currentIndex = nextIndex);
+    unawaited(_loadMissingVideoFps());
     await _initializeVideo(autoplay: shouldContinuePlayback);
   }
+
+  Future<void> _loadMissingVideoFps() async {
+    final recordIndex = _currentIndex;
+    final record = _records[recordIndex];
+    if (_isValidFps(record.videoFps) || record.videoPath.isEmpty) {
+      return;
+    }
+
+    final metadata = await _safeReadVideoMetadata(record.videoPath);
+    final videoFps = metadata?.frameRate;
+    if (!_isValidFps(videoFps) ||
+        !mounted ||
+        recordIndex >= _records.length ||
+        _records[recordIndex].id != record.id) {
+      return;
+    }
+
+    final updated = _records[recordIndex].copyWith(videoFps: videoFps);
+    setState(() => _records[recordIndex] = updated);
+    await ref.read(historyRepositoryProvider).saveRecord(updated);
+    await ref.read(historyControllerProvider.notifier).recordSaved(updated);
+  }
+
+  Future<NativeVideoMetadataResult?> _safeReadVideoMetadata(
+    String videoPath,
+  ) async {
+    try {
+      return _capturePlatformChannel.readVideoMetadata(videoPath);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isValidFps(double? fps) =>
+      fps != null && fps > 0 && !fps.isNaN && !fps.isInfinite;
 
   Future<void> _handleHorizontalSwipe(DragEndDetails details) async {
     final velocity = details.primaryVelocity ?? 0;
@@ -484,19 +533,17 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                     Text(
                       'Duration: ${Formatters.formatDurationMs(currentRecord.durationMs)}',
                     ),
+                    Text(
+                      'Frame rate: ${Formatters.formatVideoFps(currentRecord.videoFps)}',
+                    ),
                     Text('Album: ${currentRecord.albumName}'),
                     Text(
                       'Location: ${currentRecord.locationLabel ?? 'Unavailable'}',
                     ),
-                    Text('Video: ${currentRecord.videoPath}'),
+                    Text('Video: ${_displayFileName(currentRecord.videoPath)}'),
                     Text('Review: ${currentRecord.reviewState.name}'),
                     Text('Dataset: ${currentRecord.datasetState.name}'),
                     Text('Tag: ${currentRecord.userTag ?? 'none'}'),
-                    if (currentRecord.poseJsonPath != null &&
-                        currentRecord.poseJsonPath!.isNotEmpty)
-                      Text('Pose JSON: ${currentRecord.poseJsonPath}'),
-                    if (currentRecord.thumbnailPath.isNotEmpty)
-                      Text('Thumbnail: ${currentRecord.thumbnailPath}'),
                   ],
                 ),
               ),

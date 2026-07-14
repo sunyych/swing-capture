@@ -176,6 +176,18 @@ class _StartupPerformanceDialogState extends State<_StartupPerformanceDialog> {
                 const SizedBox(height: 12),
                 _PerformanceMetricRow(
                   icon: Icons.accessibility_new,
+                  label: 'Pose detection',
+                  value: report == null
+                      ? 'Running...'
+                      : '${report.poseDetection.fps.toStringAsFixed(0)} fps',
+                  detail: report == null
+                      ? null
+                      : '${report.poseDetection.framesProcessed} frames, '
+                            '${report.poseDetection.candidatesDetected} candidates',
+                ),
+                const SizedBox(height: 12),
+                _PerformanceMetricRow(
+                  icon: Icons.timeline,
                   label: 'Pose processing',
                   value: report == null
                       ? 'Running...'

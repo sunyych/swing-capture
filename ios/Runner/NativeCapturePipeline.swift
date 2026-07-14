@@ -61,7 +61,7 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   private var preRollMs: Int64 = 3000
   private var postRollMs: Int64 = 3000
   private var segmentDurationMs: Int64 = 2000
-  private var videoFpsMode: String = "fps60"
+  private var videoFpsMode: String = "fps120"
 
   private var currentRecordingURL: URL?
   private var currentSegmentStartEpochMs: Int64 = 0
@@ -489,6 +489,8 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
         "targetFps": nominalTargetFps(),
         "achievedFps": nil,
         "highSpeed": videoFpsMode != "standard",
+        "segmentRecording": movieOutput?.isRecording ?? false,
+        "segmentStarting": false,
       ]
     )
   }

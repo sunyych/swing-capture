@@ -53,6 +53,14 @@ class _FakeStartupPerformanceBenchmark extends StartupPerformanceBenchmark {
   Future<StartupPerformanceReport> run() async {
     return StartupPerformanceReport(
       recordingCapability: null,
+      poseDetection: const PoseDetectionBenchmarkResult(
+        framesProcessed: 600,
+        candidatesDetected: 1200,
+        selectedFrames: 600,
+        elapsed: Duration(milliseconds: 8),
+        fps: 75000,
+        averageCandidatesPerFrame: 2,
+      ),
       poseProcessing: const PoseProcessingBenchmarkResult(
         framesProcessed: 1200,
         elapsed: Duration(milliseconds: 10),
@@ -113,6 +121,7 @@ void main() {
 
     expect(find.text('Performance tests'), findsOneWidget);
     expect(find.text('Recording profile'), findsOneWidget);
+    expect(find.text('Pose detection'), findsOneWidget);
     expect(find.text('Pose processing'), findsOneWidget);
 
     await tester.tap(find.text('Don\'t show test content'));

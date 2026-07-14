@@ -272,6 +272,7 @@ class _VideoStudioPageState extends ConsumerState<VideoStudioPage> {
           ..writeln('id=${record.id}')
           ..writeln('createdAt=${record.createdAt.toIso8601String()}')
           ..writeln('durationMs=${record.durationMs}')
+          ..writeln('videoFps=${record.videoFps ?? ''}')
           ..writeln('videoPath=${record.videoPath}')
           ..writeln('poseJsonPath=${record.poseJsonPath ?? ''}')
           ..writeln('tag=${record.userTag ?? ''}')

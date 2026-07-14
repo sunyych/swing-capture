@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.media.MediaCodec
@@ -14,6 +15,8 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.KeyEvent
 import android.webkit.MimeTypeMap
@@ -28,12 +31,18 @@ import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        const val ACTION_RUN_HIGH_SPEED_BUFFER_SELF_TEST =
+            "com.lumiaiq.MotionCapture.RUN_HIGH_SPEED_BUFFER_SELF_TEST"
+    }
+
     private val channelName = "swingcapture/capture"
     private val captureEventChannelName = "swingcapture/capture_events"
     private val dualCameraBleChannelName = "swingcapture/dual_camera_ble"
@@ -127,12 +136,18 @@ class MainActivity : FlutterActivity() {
                 "createAlbumIfNeeded",
                 "saveToGallery" -> result.success(null)
                 "pickVideoFromLibrary" -> pickVideoFromLibrary(call, result)
+                "readVideoMetadata" -> readVideoMetadata(call, result)
                 "extractPoseFramesFromVideo" -> extractPoseFramesFromVideo(call, result)
                 "setVolumeKeysConsumed" -> {
                     consumeVolumeKeys = call.arguments as? Boolean ?: false
                     result.success(null)
                 }
                 "saveClip" -> saveClip(call, result)
+                "getCapabilities",
+                "startCapture",
+                "stopCapture",
+                "setSensitivity",
+                "getSavedClips",
                 "startPreview",
                 "queryRecordingCapability",
                 "stopPreview",
@@ -141,6 +156,7 @@ class MainActivity : FlutterActivity() {
                 "startBuffering",
                 "stopBuffering",
                 "saveBufferedClip",
+                "runStartupBufferTest",
                 "switchCamera",
                 "setZoomRatio",
                 "startRtmpStream",
@@ -152,6 +168,13 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        maybeRunHighSpeedBufferSelfTest(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        maybeRunHighSpeedBufferSelfTest(intent)
     }
 
     override fun onDestroy() {
@@ -159,6 +182,20 @@ class MainActivity : FlutterActivity() {
         nativeCapturePipeline.dispose()
         videoImportExecutor.shutdown()
         super.onDestroy()
+    }
+
+    private fun maybeRunHighSpeedBufferSelfTest(intent: Intent?) {
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+            intent?.action != ACTION_RUN_HIGH_SPEED_BUFFER_SELF_TEST
+        ) {
+            return
+        }
+        intent.action = null
+        Handler(Looper.getMainLooper()).postDelayed(
+            { nativeCapturePipeline.runDebugHighSpeedBufferSelfTest() },
+            1500L,
+        )
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -679,6 +716,33 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun readVideoMetadata(
+        call: io.flutter.plugin.common.MethodCall,
+        result: MethodChannel.Result,
+    ) {
+        val videoPath = call.argument<String>("videoPath")
+        if (videoPath.isNullOrBlank()) {
+            result.error(
+                "invalid_args",
+                "readVideoMetadata requires videoPath",
+                null
+            )
+            return
+        }
+
+        val durationMs = try {
+            readDurationMs(videoPath)
+        } catch (_: Exception) {
+            0L
+        }
+        result.success(
+            mapOf(
+                "durationMs" to durationMs,
+                "frameRate" to probeVideoTrackFrameRate(videoPath),
+            )
+        )
+    }
+
     private fun readDurationMs(sourcePath: String): Long {
         val retriever = MediaMetadataRetriever()
         return try {
@@ -688,6 +752,86 @@ class MainActivity : FlutterActivity() {
         } finally {
             retriever.release()
         }
+    }
+
+    private fun probeVideoTrackFrameRate(sourcePath: String): Double? {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(sourcePath)
+            for (trackIndex in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(trackIndex)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (!mime.startsWith("video/")) {
+                    continue
+                }
+                if (!format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                    continue
+                }
+                val frameRate = try {
+                    format.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble()
+                } catch (_: Exception) {
+                    try {
+                        format.getFloat(MediaFormat.KEY_FRAME_RATE).toDouble()
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                if (frameRate != null && frameRate > 0) {
+                    return frameRate
+                }
+            }
+        } catch (_: Exception) {
+            return deriveVideoFrameRateFromSamples(sourcePath)
+        } finally {
+            extractor.release()
+        }
+        return deriveVideoFrameRateFromSamples(sourcePath)
+    }
+
+    private fun deriveVideoFrameRateFromSamples(sourcePath: String): Double? {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(sourcePath)
+            var videoTrack = -1
+            for (trackIndex in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(trackIndex).getString(MediaFormat.KEY_MIME)
+                    ?: continue
+                if (mime.startsWith("video/")) {
+                    videoTrack = trackIndex
+                    break
+                }
+            }
+            if (videoTrack < 0) {
+                return null
+            }
+
+            extractor.selectTrack(videoTrack)
+            var firstTimeUs = -1L
+            var lastTimeUs = -1L
+            var frames = 0
+            while (frames < 1200 && extractor.sampleTrackIndex == videoTrack) {
+                val sampleTimeUs = extractor.sampleTime
+                if (sampleTimeUs < 0) {
+                    break
+                }
+                if (firstTimeUs < 0) {
+                    firstTimeUs = sampleTimeUs
+                }
+                lastTimeUs = sampleTimeUs
+                frames += 1
+                if (!extractor.advance()) {
+                    break
+                }
+            }
+            if (frames >= 2 && lastTimeUs > firstTimeUs) {
+                return (frames - 1) * 1_000_000.0 / (lastTimeUs - firstTimeUs)
+            }
+        } catch (_: Exception) {
+            return null
+        } finally {
+            extractor.release()
+        }
+        return null
     }
 
     private fun trimVideo(
@@ -703,6 +847,7 @@ class MainActivity : FlutterActivity() {
 
         val extractor = MediaExtractor()
         extractor.setDataSource(sourcePath)
+        val sourceFrameRate = probeVideoTrackFrameRate(sourcePath)
 
         val trackIndexMap = mutableMapOf<Int, Int>()
         val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -726,6 +871,9 @@ class MainActivity : FlutterActivity() {
             val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
             if (mime.startsWith("video/") || mime.startsWith("audio/")) {
                 extractor.selectTrack(track)
+                if (mime.startsWith("video/")) {
+                    writeFrameRateIntoFormat(format, sourceFrameRate)
+                }
                 trackIndexMap[track] = muxer.addTrack(format)
                 if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
                     bufferSize = maxOf(bufferSize, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
@@ -776,5 +924,15 @@ class MainActivity : FlutterActivity() {
         muxer.stop()
         muxer.release()
         extractor.release()
+    }
+
+    private fun writeFrameRateIntoFormat(format: MediaFormat, frameRate: Double?) {
+        if (frameRate == null || frameRate <= 0.0 || frameRate.isNaN() || frameRate.isInfinite()) {
+            return
+        }
+        format.setInteger(
+            MediaFormat.KEY_FRAME_RATE,
+            frameRate.roundToInt().coerceAtLeast(1),
+        )
     }
 }

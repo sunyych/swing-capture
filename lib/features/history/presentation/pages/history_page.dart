@@ -434,6 +434,9 @@ class _HistoryGalleryTile extends StatelessWidget {
       item.record.createdAt,
     );
     final durationLabel = Formatters.formatDurationMs(item.record.durationMs);
+    final videoFpsLabel = item.record.videoFps == null
+        ? null
+        : Formatters.formatVideoFps(item.record.videoFps);
 
     return Material(
       color: const Color(0xFF132833),
@@ -538,6 +541,25 @@ class _HistoryGalleryTile extends StatelessWidget {
                             color: Colors.white.withValues(alpha: 0.9),
                           ),
                         ),
+                        if (videoFpsLabel != null) ...[
+                          const SizedBox(width: 10),
+                          Icon(
+                            Icons.speed_rounded,
+                            size: 14,
+                            color: Colors.white.withValues(alpha: 0.9),
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              videoFpsLabel,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: Colors.white.withValues(alpha: 0.9),
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 2),

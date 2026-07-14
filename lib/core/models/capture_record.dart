@@ -15,6 +15,7 @@ class CaptureRecord {
     required this.createdAt,
     required this.durationMs,
     required this.albumName,
+    this.videoFps,
     this.poseJsonPath,
     this.latitude,
     this.longitude,
@@ -36,6 +37,7 @@ class CaptureRecord {
   final DateTime createdAt;
   final int durationMs;
   final String albumName;
+  final double? videoFps;
   final String? poseJsonPath;
   final double? latitude;
   final double? longitude;
@@ -57,6 +59,7 @@ class CaptureRecord {
     String? modelLabel,
     double? modelConfidence,
     TrainingLifecycleState? trainingState,
+    double? videoFps,
   }) {
     return CaptureRecord(
       id: id,
@@ -65,6 +68,7 @@ class CaptureRecord {
       createdAt: createdAt,
       durationMs: durationMs,
       albumName: albumName,
+      videoFps: videoFps ?? this.videoFps,
       poseJsonPath: poseJsonPath,
       latitude: latitude,
       longitude: longitude,
@@ -89,6 +93,7 @@ class CaptureRecord {
       'createdAt': createdAt.toIso8601String(),
       'durationMs': durationMs,
       'albumName': albumName,
+      'videoFps': videoFps,
       'poseJsonPath': poseJsonPath,
       'latitude': latitude,
       'longitude': longitude,
@@ -111,8 +116,9 @@ class CaptureRecord {
       videoPath: map['videoPath'] as String,
       thumbnailPath: map['thumbnailPath'] as String,
       createdAt: DateTime.parse(map['createdAt'] as String),
-      durationMs: map['durationMs'] as int,
+      durationMs: (map['durationMs'] as num).toInt(),
       albumName: map['albumName'] as String,
+      videoFps: (map['videoFps'] as num?)?.toDouble(),
       poseJsonPath: map['poseJsonPath'] as String?,
       latitude: (map['latitude'] as num?)?.toDouble(),
       longitude: (map['longitude'] as num?)?.toDouble(),
