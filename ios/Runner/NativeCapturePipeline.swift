@@ -1,16 +1,11 @@
 import AVFoundation
 import CoreMedia
+import CoreVideo
 import Flutter
 import Foundation
 import HaishinKit
 import UIKit
 import Vision
-
-private struct BufferedSegment {
-  let path: String
-  let startEpochMs: Int64
-  let endEpochMs: Int64
-}
 
 private struct ZoomLens {
   let device: AVCaptureDevice
@@ -38,7 +33,7 @@ private enum RtmpUrl {
   }
 }
 
-final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegate {
+final class NativeCapturePipeline: NSObject {
   private var eventSink: FlutterEventSink?
   private var methodChannel: FlutterMethodChannel?
 
@@ -46,11 +41,24 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   private let sessionQueue = DispatchQueue(label: "com.swingcapture.session")
   private let writerQueue = DispatchQueue(label: "com.swingcapture.writer")
   private let poseQueue = DispatchQueue(label: "com.swingcapture.pose")
+  private let videoOutputQueue = DispatchQueue(
+    label: "com.swingcapture.video_output",
+    qos: .userInteractive
+  )
+  private let poseStateLock = NSLock()
 
   private var captureSession: AVCaptureSession?
-  private var movieOutput: AVCaptureMovieFileOutput?
   private var videoDataOutput: AVCaptureVideoDataOutput?
   private var previewContainer: PreviewContainerView?
+  private let rollingBuffer = IOSRustEncodedRollingBuffer()
+  private lazy var videoEncoder = IOSVideoToolboxEncoder(
+    outputHandler: { [weak self] sampleBuffer in
+      self?.handleEncodedSample(sampleBuffer)
+    },
+    errorHandler: { [weak self] error in
+      self?.handleEncoderFailure(error)
+    }
+  )
 
   private var lensPosition: AVCaptureDevice.Position = .back
   private var activeCameraUniqueID: String?
@@ -60,13 +68,17 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   private var bufferingEnabled = false
   private var preRollMs: Int64 = 3000
   private var postRollMs: Int64 = 3000
-  private var segmentDurationMs: Int64 = 2000
   private var videoFpsMode: String = "fps120"
-
-  private var currentRecordingURL: URL?
-  private var currentSegmentStartEpochMs: Int64 = 0
-  private var segmentRotateWorkItem: DispatchWorkItem?
-  private var completedSegments: [BufferedSegment] = []
+  private var activeProfile: IOSCaptureProfile?
+  private var activeCodec = "h264"
+  private var nextFallbackIndex = 0
+  private var profileValidationComplete = false
+  private var fallbackInProgress = false
+  private var encodedSampleSeen = false
+  private var firstEncodedSampleEmitted = false
+  private var encoderWatchdog: DispatchWorkItem?
+  private var lastBufferStatePtsUs: Int64 = -1
+  private var lastPosePtsUs: Int64 = -1
   private var isProcessingPose = false
 
   private var rtmpConnection: RTMPConnection?
@@ -125,10 +137,13 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
         if let m = args["videoFpsMode"] as? String { videoFpsMode = m }
       }
       bufferingEnabled = true
-      segmentDurationMs = computeSegmentSliceMs(preRollMs: preRollMs, postRollMs: postRollMs)
+      nextFallbackIndex = 0
+      firstEncodedSampleEmitted = false
+      encodedSampleSeen = false
+      profileValidationComplete = false
+      sendBufferState(segmentStarting: true)
       sessionQueue.async { [weak self] in
         self?.rebuildSessionIfNeeded()
-        self?.startNewSegmentIfBuffering()
       }
       result(nil)
     case "stopBuffering":
@@ -146,11 +161,16 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       }
       preRollMs = pr.int64Value
       postRollMs = po.int64Value
-      saveBufferedClip(outputPath: outputPath, triggerEpochMs: trigger.int64Value, result: result)
+      saveBufferedClip(
+        outputPath: outputPath,
+        triggerEpochMs: trigger.int64Value,
+        result: result
+      )
     case "switchCamera":
       lensPosition = lensPosition == .back ? .front : .back
       activeCameraUniqueID = nil
       requestedZoomRatio = 1
+      nextFallbackIndex = 0
       sessionQueue.async { [weak self] in
         self?.rebuildSessionIfNeeded()
         self?.sendCameraState()
@@ -323,12 +343,14 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
   }
 
   private func tearDownCaptureSessionOnSessionQueue() {
-    movieOutput?.stopRecording()
-    movieOutput = nil
+    encoderWatchdog?.cancel()
+    encoderWatchdog = nil
+    videoEncoder.stop()
     videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
     videoDataOutput = nil
     captureSession?.stopRunning()
     captureSession = nil
+    activeProfile = nil
   }
 
   private func rebuildSessionIfNeeded() {
@@ -337,39 +359,49 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
     tearDownCaptureSessionOnSessionQueue()
 
     let session = AVCaptureSession()
-    session.sessionPreset = .hd1280x720
+    session.beginConfiguration()
+    session.sessionPreset = .inputPriority
 
     guard let device = cameraDevice(),
           let input = try? AVCaptureDeviceInput(device: device),
           session.canAddInput(input)
     else {
+      session.commitConfiguration()
       sendError(code: "camera_input_failed", message: "Unable to open camera.")
       return
     }
-    configureDeviceForCurrentVideoMode(device)
-    applyZoom(to: device)
     session.addInput(input)
-
-    if let audio = AVCaptureDevice.default(for: .audio),
-       let audioIn = try? AVCaptureDeviceInput(device: audio),
-       session.canAddInput(audioIn) {
-      session.addInput(audioIn)
+    guard configureDevice(device, forBuffering: bufferingEnabled) else {
+      session.commitConfiguration()
+      sendError(
+        code: "capture_profile_unavailable",
+        message: "None of 1080p120, 720p120, 1080p60, 720p60, or 1080p30 could start."
+      )
+      return
     }
-
-    let movie = AVCaptureMovieFileOutput()
-    if session.canAddOutput(movie) {
-      session.addOutput(movie)
-      movieOutput = movie
-    }
+    applyZoom(to: device)
 
     let videoOut = AVCaptureVideoDataOutput()
-    videoOut.alwaysDiscardsLateVideoFrames = true
-    videoOut.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+    videoOut.alwaysDiscardsLateVideoFrames = !bufferingEnabled
+    videoOut.videoSettings = [
+      kCVPixelBufferPixelFormatTypeKey as String:
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    ]
     if session.canAddOutput(videoOut) {
       session.addOutput(videoOut)
-      videoOut.setSampleBufferDelegate(self, queue: poseQueue)
+      videoOut.setSampleBufferDelegate(self, queue: videoOutputQueue)
       videoDataOutput = videoOut
+    } else {
+      session.commitConfiguration()
+      videoEncoder.stop()
+      sendError(
+        code: "yuv_output_unavailable",
+        message: "AVFoundation could not add the NV12/YUV video output."
+      )
+      return
     }
+    configureVideoConnection(videoOut.connection(with: .video))
+    session.commitConfiguration()
 
     captureSession = session
     session.startRunning()
@@ -379,7 +411,10 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       self.previewContainer?.showClassicPreview(session: s)
     }
     sendCameraState()
-    sendBufferState()
+    sendBufferState(segmentStarting: bufferingEnabled)
+    if bufferingEnabled {
+      scheduleEncoderWatchdog(for: activeProfile)
+    }
   }
 
   private func cameraDevice() -> AVCaptureDevice? {
@@ -479,34 +514,47 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
     )
   }
 
-  private func sendBufferState() {
-    emit(
-      [
-        "type": "buffer_state",
-        "buffering": bufferingEnabled,
-        "completedSegmentCount": completedSegments.count,
-        "segmentSliceMs": Int(segmentDurationMs),
-        "targetFps": nominalTargetFps(),
-        "achievedFps": nil,
-        "highSpeed": videoFpsMode != "standard",
-        "segmentRecording": movieOutput?.isRecording ?? false,
-        "segmentStarting": false,
-      ]
-    )
+  private func sendBufferState(segmentStarting: Bool = false) {
+    let metrics = rollingBuffer.metrics()
+    let profile = activeProfile
+    var payload: [String: Any] = [
+      "type": "buffer_state",
+      "buffering": bufferingEnabled,
+      "completedSegmentCount": 0,
+      "segmentSliceMs": 0,
+      "queueFrameCapacity": max((profile?.fps ?? 30) * rollingWindowSeconds(), 1),
+      "queueDurationMs": rollingWindowMilliseconds(),
+      "bufferedFrameCount": Int(metrics.sampleCount),
+      "bufferedDurationMs": Int(metrics.durationUs / 1000),
+      "bufferedBytes": Int(clamping: metrics.sizeBytes),
+      "targetFps": profile?.fps ?? Int(nominalTargetFps()),
+      "highSpeed": (profile?.fps ?? 30) >= 60,
+      "segmentRecording": bufferingEnabled && metrics.sampleCount > 0,
+      "segmentStarting": bufferingEnabled && (segmentStarting || metrics.sampleCount == 0),
+      "codec": activeCodec,
+      "bufferOwner": "rust",
+    ]
+    if let profile {
+      payload["profileWidth"] = Int(profile.width)
+      payload["profileHeight"] = Int(profile.height)
+    }
+    if let achievedFps = metrics.achievedFps {
+      payload["achievedFps"] = achievedFps
+    }
+    emit(payload)
   }
 
   private func nominalTargetFps() -> Double {
     switch videoFpsMode {
     case "fps60": return 60
     case "fps120": return 120
-    case "fps240": return 240
-    case "maxSupported": return 240
+    case "fps240": return 120
+    case "maxSupported": return 120
     default: return 30
     }
   }
 
   private func recommendedModeForMaxFps(_ maxFps: Int) -> String {
-    if maxFps >= 240 { return "fps240" }
     if maxFps >= 120 { return "fps120" }
     if maxFps >= 60 { return "fps60" }
     return "standard"
@@ -517,12 +565,11 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
     for format in device.formats {
       for range in format.videoSupportedFrameRateRanges {
         let maxFps = Int(floor(range.maxFrameRate))
-        if maxFps >= 240 {
-          values.insert(240)
-        } else if maxFps >= 120 {
-          values.insert(120)
-        } else if maxFps >= 60 {
+        if maxFps >= 60 {
           values.insert(60)
+        }
+        if maxFps >= 120 {
+          values.insert(120)
         }
       }
     }
@@ -560,25 +607,17 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
         "supportedFps": supported,
       ]
     }
-    let supported = commonSupportedFps(lensCapabilities)
+    let activeDevice = cameraDevice() ?? lenses[0].device
+    let supported = normalizedSupportedFps(for: activeDevice)
     let maxFps = supported.max() ?? 30
     return [
       "maxFps": maxFps,
       "supportedFps": supported,
       "recommendedVideoFpsMode": recommendedModeForMaxFps(maxFps),
       "source": "avfoundation",
-      "cameraLabel": "across \(lensCapabilities.count) lenses",
+      "cameraLabel": activeDevice.localizedName,
       "lensCapabilities": lensCapabilities,
     ]
-  }
-
-  private func commonSupportedFps(_ lensCapabilities: [[String: Any]]) -> [Int] {
-    var common: Set<Int>?
-    for capability in lensCapabilities {
-      let supported = Set(capability["supportedFps"] as? [Int] ?? [30])
-      common = common.map { $0.intersection(supported) } ?? supported
-    }
-    return Array(common ?? [30]).isEmpty ? [30] : Array(common ?? [30]).sorted()
   }
 
   private func cameraCapabilityLabel(for lens: ZoomLens) -> String {
@@ -588,152 +627,241 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
     return String(format: "back %.1fx lens", Double(lens.baseZoom))
   }
 
-  private func targetFpsForCurrentDevice(_ device: AVCaptureDevice) -> Double {
-    if videoFpsMode == "maxSupported" {
-      return Double(normalizedSupportedFps(for: device).max() ?? 30)
+  private func configureDevice(
+    _ device: AVCaptureDevice,
+    forBuffering: Bool
+  ) -> Bool {
+    let profiles: [IOSCaptureProfile]
+    if forBuffering {
+      profiles = Array(iosCaptureFallbackLadder.dropFirst(nextFallbackIndex))
+    } else {
+      profiles = [IOSCaptureProfile(width: 1920, height: 1080, fps: 30)]
     }
-    return nominalTargetFps()
-  }
 
-  private func configureDeviceForCurrentVideoMode(_ device: AVCaptureDevice) {
-    let targetFps = targetFpsForCurrentDevice(device)
-    guard targetFps > 30 else { return }
-    var selectedFormat: AVCaptureDevice.Format?
-    var selectedMaxFps: Double = 0
-    var selectedArea: Int32 = 0
-
-    for format in device.formats {
-      var supportsTarget = false
-      var formatMaxFps: Double = 0
-      for range in format.videoSupportedFrameRateRanges {
-        formatMaxFps = max(formatMaxFps, range.maxFrameRate)
-        if range.maxFrameRate >= targetFps && range.minFrameRate <= targetFps {
-          supportsTarget = true
+    for profile in profiles {
+      let ladderIndex = iosCaptureFallbackLadder.firstIndex(of: profile) ?? 0
+      guard let format = captureFormat(for: profile, on: device) else {
+        if forBuffering {
+          emitProfileFallback(
+            from: profile,
+            reason: "AVCaptureDevice has no exact \(profile) NV12-capable format."
+          )
         }
-      }
-      if !supportsTarget {
         continue
       }
-      let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-      let area = dimensions.width * dimensions.height
-      if selectedFormat == nil ||
-        formatMaxFps > selectedMaxFps ||
-        (formatMaxFps == selectedMaxFps && area > selectedArea) {
-        selectedFormat = format
-        selectedMaxFps = formatMaxFps
-        selectedArea = area
+      do {
+        try apply(profile: profile, format: format, to: device)
+        if forBuffering {
+          let bitrate = bitrateBps(for: profile)
+          let codec = try videoEncoder.start(profile: profile, bitrateBps: bitrate)
+          try rollingBuffer.reset(
+            windowUs: Int64(rollingWindowMilliseconds()) * 1000,
+            profile: profile,
+            codec: codec,
+            bitrateBps: bitrate,
+            orientationDegrees: videoOrientationDegrees()
+          )
+          activeCodec = codec
+          nextFallbackIndex = ladderIndex
+          encodedSampleSeen = false
+          firstEncodedSampleEmitted = false
+          profileValidationComplete = false
+          lastBufferStatePtsUs = -1
+        }
+        activeProfile = profile
+        return true
+      } catch {
+        videoEncoder.stop()
+        rollingBuffer.clear()
+        if forBuffering {
+          emitProfileFallback(from: profile, reason: error.localizedDescription)
+          nextFallbackIndex = ladderIndex + 1
+        }
       }
     }
-    guard let format = selectedFormat else { return }
+    return false
+  }
 
-    var locked = false
-    do {
-      try device.lockForConfiguration()
-      locked = true
-      device.activeFormat = format
-      let frameDuration = CMTime(
-        value: 1,
-        timescale: CMTimeScale(Int32(targetFps.rounded()))
-      )
-      device.activeVideoMinFrameDuration = frameDuration
-      device.activeVideoMaxFrameDuration = frameDuration
-      device.unlockForConfiguration()
-    } catch {
-      if locked {
-        device.unlockForConfiguration()
+  private func apply(
+    profile: IOSCaptureProfile,
+    format: AVCaptureDevice.Format,
+    to device: AVCaptureDevice
+  ) throws {
+    try device.lockForConfiguration()
+    defer { device.unlockForConfiguration() }
+    device.activeFormat = format
+    let duration = CMTime(value: 1, timescale: CMTimeScale(profile.fps))
+    device.activeVideoMinFrameDuration = duration
+    device.activeVideoMaxFrameDuration = duration
+  }
+
+  private func bitrateBps(for profile: IOSCaptureProfile) -> Int {
+    let pixels = Double(profile.width * profile.height)
+    let scale = pixels / (1920 * 1080) * (Double(profile.fps) / 30)
+    return min(max(Int((12_000_000 * scale).rounded()), 8_000_000), 80_000_000)
+  }
+
+  private func rollingWindowMilliseconds() -> Int {
+    max(Int(preRollMs + postRollMs), 4000)
+  }
+
+  private func rollingWindowSeconds() -> Int {
+    max(Int(ceil(Double(rollingWindowMilliseconds()) / 1000)), 1)
+  }
+
+  private func emitProfileFallback(from profile: IOSCaptureProfile, reason: String) {
+    let next = iosCaptureFallbackLadder
+      .drop(while: { $0 != profile })
+      .dropFirst()
+      .first
+    var payload: [String: Any] = [
+      "type": "ProfileFallback",
+      "from": profile.description,
+      "reason": reason,
+    ]
+    if let next {
+      payload["to"] = next.description
+    }
+    emit(payload)
+  }
+
+  private func configureVideoConnection(_ connection: AVCaptureConnection?) {
+    guard let connection else { return }
+    if connection.isVideoOrientationSupported {
+      connection.videoOrientation = switch videoOrientationDegrees() {
+      case 0: .landscapeRight
+      case 180: .landscapeLeft
+      case 270: .portraitUpsideDown
+      default: .portrait
+      }
+    }
+    if connection.isVideoMirroringSupported {
+      connection.isVideoMirrored = lensPosition == .front
+    }
+  }
+
+  private func videoOrientationDegrees() -> Int {
+    switch UIDevice.current.orientation {
+    case .landscapeLeft: return 0
+    case .landscapeRight: return 180
+    case .portraitUpsideDown: return 270
+    default: return 90
+    }
+  }
+
+  private func handleEncodedSample(_ sampleBuffer: CMSampleBuffer) {
+    guard bufferingEnabled, rollingBuffer.push(sampleBuffer) else { return }
+    let metrics = rollingBuffer.metrics()
+    let ptsUs = CMTimeConvertScale(
+      CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+      timescale: 1_000_000,
+      method: .default
+    ).value
+
+    if !firstEncodedSampleEmitted {
+      firstEncodedSampleEmitted = true
+      let profile = activeProfile
+      emit([
+        "type": "CaptureStarted",
+        "width": profile.map { Int($0.width) } ?? 0,
+        "height": profile.map { Int($0.height) } ?? 0,
+        "fps": profile?.fps ?? 0,
+        "codec": activeCodec,
+        "bufferOwner": "rust",
+      ])
+    }
+    if lastBufferStatePtsUs < 0 || ptsUs - lastBufferStatePtsUs >= 500_000 {
+      lastBufferStatePtsUs = ptsUs
+      sendBufferState()
+    }
+
+    let profile = activeProfile
+    sessionQueue.async { [weak self] in
+      guard let self, self.bufferingEnabled, self.activeProfile == profile else { return }
+      self.encodedSampleSeen = true
+      self.encoderWatchdog?.cancel()
+      self.encoderWatchdog = nil
+      guard !self.profileValidationComplete,
+            metrics.durationUs >= 1_500_000,
+            let achieved = metrics.achievedFps,
+            let profile
+      else {
+        return
+      }
+      self.profileValidationComplete = true
+      let minimum = minimumAcceptedIOSCaptureFps(for: profile)
+      if achieved < minimum {
+        self.fallbackFromActiveProfile(
+          reason: String(
+            format: "Measured encoded throughput %.1ffps is below %.1ffps.",
+            achieved,
+            minimum
+          )
+        )
       }
     }
   }
 
-  private func computeSegmentSliceMs(preRollMs: Int64, postRollMs: Int64) -> Int64 {
-    let ring = preRollMs + postRollMs + 1500
-    let highSpeed = videoFpsMode != "standard"
-    let slice = ring / (highSpeed ? 3 : 5)
-    let minSlice: Int64 = highSpeed ? 1800 : 600
-    let maxSlice: Int64 = highSpeed ? 4500 : 2800
-    return min(max(slice, minSlice), maxSlice)
+  private func handleEncoderFailure(_ error: Error) {
+    sessionQueue.async { [weak self] in
+      guard let self, self.bufferingEnabled else { return }
+      self.fallbackFromActiveProfile(reason: error.localizedDescription)
+    }
+  }
+
+  private func scheduleEncoderWatchdog(for profile: IOSCaptureProfile?) {
+    encoderWatchdog?.cancel()
+    guard let profile else { return }
+    let watchdog = DispatchWorkItem { [weak self] in
+      guard let self,
+            self.bufferingEnabled,
+            self.activeProfile == profile,
+            !self.encodedSampleSeen
+      else {
+        return
+      }
+      self.fallbackFromActiveProfile(
+        reason: "No VideoToolbox encoded sample arrived within 2.5 seconds."
+      )
+    }
+    encoderWatchdog = watchdog
+    sessionQueue.asyncAfter(deadline: .now() + .milliseconds(2500), execute: watchdog)
+  }
+
+  private func fallbackFromActiveProfile(reason: String) {
+    guard !fallbackInProgress, let profile = activeProfile else { return }
+    let currentIndex = iosCaptureFallbackLadder.firstIndex(of: profile) ?? nextFallbackIndex
+    let nextIndex = currentIndex + 1
+    guard nextIndex < iosCaptureFallbackLadder.count else {
+      profileValidationComplete = true
+      sendError(
+        code: "capture_throughput_degraded",
+        message: "1080p30 fallback is active but degraded: \(reason)"
+      )
+      return
+    }
+    fallbackInProgress = true
+    emitProfileFallback(from: profile, reason: reason)
+    nextFallbackIndex = nextIndex
+    rebuildSessionIfNeeded()
+    fallbackInProgress = false
   }
 
   private func stopBuffering(discardSegments: Bool) {
     bufferingEnabled = false
-    segmentRotateWorkItem?.cancel()
-    segmentRotateWorkItem = nil
+    encoderWatchdog?.cancel()
+    encoderWatchdog = nil
     sessionQueue.async { [weak self] in
       guard let self else { return }
-      self.movieOutput?.stopRecording()
-      if discardSegments {
-        for s in self.completedSegments {
-          try? FileManager.default.removeItem(atPath: s.path)
-        }
-        self.completedSegments.removeAll()
-      }
+      self.videoEncoder.stop()
+      self.rollingBuffer.clear()
+      self.activeProfile = nil
+      self.firstEncodedSampleEmitted = false
+      self.encodedSampleSeen = false
       self.sendBufferState()
-    }
-  }
-
-  private func startNewSegmentIfBuffering() {
-    guard bufferingEnabled, let movie = movieOutput, let session = captureSession, session.isRunning else {
-      return
-    }
-    let name = "seg_\(Int(Date().timeIntervalSince1970 * 1000)).mov"
-    let url = clipsDirectory.appendingPathComponent(name)
-    currentRecordingURL = url
-    currentSegmentStartEpochMs = Int64(Date().timeIntervalSince1970 * 1000)
-    if movie.isRecording {
-      movie.stopRecording()
-    }
-    movie.startRecording(to: url, recordingDelegate: self)
-    scheduleSegmentRotation()
-  }
-
-  private func scheduleSegmentRotation() {
-    segmentRotateWorkItem?.cancel()
-    let work = DispatchWorkItem { [weak self] in
-      self?.rotateSegment()
-    }
-    segmentRotateWorkItem = work
-    sessionQueue.asyncAfter(deadline: .now() + .milliseconds(Int(segmentDurationMs)), execute: work)
-  }
-
-  private func rotateSegment() {
-    guard bufferingEnabled else { return }
-    movieOutput?.stopRecording()
-  }
-
-  // MARK: - AVCaptureFileOutputRecordingDelegate
-
-  func fileOutput(
-    _ output: AVCaptureFileOutput,
-    didFinishRecordingTo outputFileURL: URL,
-    from connections: [AVCaptureConnection],
-    error: Error?
-  ) {
-    sessionQueue.async { [weak self] in
-      guard let self else { return }
-      let end = Int64(Date().timeIntervalSince1970 * 1000)
-      let start = self.currentSegmentStartEpochMs
-      if error == nil, FileManager.default.fileExists(atPath: outputFileURL.path) {
-        self.completedSegments.append(
-          BufferedSegment(path: outputFileURL.path, startEpochMs: start, endEpochMs: end)
-        )
-        self.pruneSegments(nowEpochMs: end)
-        self.sendBufferState()
+      if self.previewRequested, self.rtmpStream == nil {
+        self.rebuildSessionIfNeeded()
       }
-      if self.bufferingEnabled {
-        self.startNewSegmentIfBuffering()
-      }
-    }
-  }
-
-  private func pruneSegments(nowEpochMs: Int64) {
-    let horizon = preRollMs + postRollMs + 2000
-    let cutoff = nowEpochMs - horizon
-    completedSegments.removeAll { segment in
-      if segment.endEpochMs < cutoff {
-        try? FileManager.default.removeItem(atPath: segment.path)
-        return true
-      }
-      return false
     }
   }
 
@@ -744,106 +872,33 @@ final class NativeCapturePipeline: NSObject, AVCaptureFileOutputRecordingDelegat
       result(FlutterError(code: "buffer_inactive", message: "Rolling buffer is not active.", details: nil))
       return
     }
-    sessionQueue.async { [weak self] in
-      guard let self else { return }
-      self.movieOutput?.stopRecording()
-      let clipStart = triggerEpochMs - self.preRollMs
-      let clipEnd = triggerEpochMs + self.postRollMs
-      let selected = self.completedSegments.filter {
-        $0.endEpochMs > clipStart && $0.startEpochMs < clipEnd
-      }
-      if selected.isEmpty {
-        DispatchQueue.main.async {
+    guard let snapshot = rollingBuffer.snapshot() else {
+      result(
+        FlutterError(
+          code: "buffer_empty",
+          message: "Rust rolling buffer has no keyframe-backed encoded video yet.",
+          details: ["triggerEpochMs": triggerEpochMs]
+        )
+      )
+      return
+    }
+    IOSCompressedClipWriter.write(
+      snapshot: snapshot,
+      outputURL: URL(fileURLWithPath: outputPath),
+      queue: writerQueue
+    ) { writeResult in
+      DispatchQueue.main.async {
+        switch writeResult {
+        case .success(let url):
+          result(url.path)
+        case .failure(let error):
           result(
             FlutterError(
-              code: "buffer_empty",
-              message: "No buffered segments overlap the requested clip window.",
+              code: "buffer_export_failed",
+              message: error.localizedDescription,
               details: nil
             )
           )
-        }
-        return
-      }
-      self.mergeSegments(segments: selected, outputPath: outputPath, clipStart: clipStart, clipEnd: clipEnd) { ok, err in
-        DispatchQueue.main.async {
-          if ok {
-            result(outputPath)
-          } else {
-            result(FlutterError(code: "buffer_export_failed", message: err ?? "export failed", details: nil))
-          }
-        }
-      }
-    }
-  }
-
-  private func mergeSegments(
-    segments: [BufferedSegment],
-    outputPath: String,
-    clipStart: Int64,
-    clipEnd: Int64,
-    done: @escaping (Bool, String?) -> Void
-  ) {
-    writerQueue.async {
-      let composition = AVMutableComposition()
-      guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-        done(false, "no video track")
-        return
-      }
-      let hasAnyAudio = segments.contains { seg in
-        let a = AVURLAsset(url: URL(fileURLWithPath: seg.path))
-        return a.tracks(withMediaType: .audio).first != nil
-      }
-      let audioTrack: AVMutableCompositionTrack? = hasAnyAudio
-        ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-        : nil
-
-      var cursor = CMTime.zero
-      for seg in segments.sorted(by: { $0.startEpochMs < $1.startEpochMs }) {
-        let url = URL(fileURLWithPath: seg.path)
-        let asset = AVURLAsset(url: url)
-        guard let srcVideo = asset.tracks(withMediaType: .video).first else { continue }
-
-        let wallT0 = max(clipStart, seg.startEpochMs)
-        let wallT1 = min(clipEnd, seg.endEpochMs)
-        if wallT1 <= wallT0 { continue }
-
-        let local0 = Double(wallT0 - seg.startEpochMs) / 1000.0
-        let local1 = Double(wallT1 - seg.startEpochMs) / 1000.0
-        let rangeStart = CMTime(seconds: local0, preferredTimescale: 600)
-        let rangeDur = CMTime(seconds: local1 - local0, preferredTimescale: 600)
-        if rangeDur.seconds <= 0 { continue }
-        let range = CMTimeRange(start: rangeStart, duration: rangeDur)
-
-        do {
-          try videoTrack.insertTimeRange(range, of: srcVideo, at: cursor)
-          if let srcAudio = asset.tracks(withMediaType: .audio).first, let at = audioTrack {
-            try at.insertTimeRange(range, of: srcAudio, at: cursor)
-          }
-          cursor = CMTimeAdd(cursor, rangeDur)
-        } catch {
-          done(false, error.localizedDescription)
-          return
-        }
-      }
-
-      guard cursor.seconds > 0 else {
-        done(false, "empty composition")
-        return
-      }
-
-      guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-        done(false, "export session")
-        return
-      }
-      let out = URL(fileURLWithPath: outputPath)
-      try? FileManager.default.removeItem(at: out)
-      export.outputURL = out
-      export.outputFileType = .mp4
-      export.exportAsynchronously {
-        if export.status == .completed {
-          done(true, nil)
-        } else {
-          done(false, export.error?.localizedDescription)
         }
       }
     }
@@ -989,27 +1044,68 @@ extension NativeCapturePipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
     didOutput sampleBuffer: CMSampleBuffer,
     from connection: AVCaptureConnection
   ) {
-    guard detectionEnabled, !isProcessingPose else { return }
-    isProcessingPose = true
-    defer { isProcessingPose = false }
-    let handler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, orientation: .up, options: [:])
-    let request = VNDetectHumanBodyPoseRequest()
-    do {
-      try handler.perform([request])
-    } catch {
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+    if bufferingEnabled, let profile = activeProfile {
+      let duration = CMSampleBufferGetDuration(sampleBuffer)
+      videoEncoder.encode(
+        pixelBuffer: pixelBuffer,
+        presentationTime: presentationTime,
+        duration: duration.isValid && duration.value > 0
+          ? duration
+          : CMTime(value: 1, timescale: CMTimeScale(profile.fps))
+      )
+    }
+
+    guard detectionEnabled else { return }
+    let ptsUs = CMTimeConvertScale(
+      presentationTime,
+      timescale: 1_000_000,
+      method: .default
+    ).value
+    guard lastPosePtsUs < 0 || ptsUs - lastPosePtsUs >= 50_000 else { return }
+    lastPosePtsUs = ptsUs
+
+    poseStateLock.lock()
+    guard !isProcessingPose else {
+      poseStateLock.unlock()
       return
     }
-    let obs = (request.results as? [VNHumanBodyPoseObservation])?.first
-    emitPose(observation: obs, buffer: sampleBuffer)
+    isProcessingPose = true
+    poseStateLock.unlock()
+
+    poseQueue.async { [weak self] in
+      guard let self else { return }
+      defer {
+        self.poseStateLock.lock()
+        self.isProcessingPose = false
+        self.poseStateLock.unlock()
+      }
+      let handler = VNImageRequestHandler(
+        cvPixelBuffer: pixelBuffer,
+        orientation: .up,
+        options: [:]
+      )
+      let request = VNDetectHumanBodyPoseRequest()
+      do {
+        try handler.perform([request])
+      } catch {
+        return
+      }
+      let observation = (request.results as? [VNHumanBodyPoseObservation])?.first
+      self.emitPose(
+        observation: observation,
+        pixelBuffer: pixelBuffer,
+        timestampMs: Int64(Date().timeIntervalSince1970 * 1000)
+      )
+    }
   }
 
-  private func emitPose(observation: VNHumanBodyPoseObservation?, buffer: CMSampleBuffer) {
-    guard let pb = CMSampleBufferGetImageBuffer(buffer) else {
-      return
-    }
-    let w = CGFloat(CVPixelBufferGetWidth(pb))
-    let h = CGFloat(CVPixelBufferGetHeight(pb))
-
+  private func emitPose(
+    observation: VNHumanBodyPoseObservation?,
+    pixelBuffer: CVPixelBuffer,
+    timestampMs: Int64
+  ) {
     var landmarks: [[String: Any]] = []
     if let observation {
       let joints: [VNHumanBodyPoseObservation.JointName] = [
@@ -1047,8 +1143,11 @@ extension NativeCapturePipeline: AVCaptureVideoDataOutputSampleBufferDelegate {
 
     emit([
       "type": "pose",
-      "timestampMs": Int64(Date().timeIntervalSince1970 * 1000),
+      "timestampMs": timestampMs,
       "landmarks": landmarks,
+      "sourceWidth": CVPixelBufferGetWidth(pixelBuffer),
+      "sourceHeight": CVPixelBufferGetHeight(pixelBuffer),
+      "pixelFormat": "nv12",
     ])
   }
 }

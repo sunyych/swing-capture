@@ -8,8 +8,7 @@ import '../features/history/presentation/pages/history_page.dart';
 import '../features/performance/data/startup_performance_repository.dart';
 import '../features/performance/domain/startup_performance_benchmark.dart';
 import '../features/settings/presentation/pages/settings_page.dart';
-import '../features/studio/presentation/pages/video_studio_page.dart';
-import '../features/training/presentation/pages/training_page.dart';
+import '../l10n/app_localizations.dart';
 import 'providers.dart';
 
 class AppShell extends ConsumerStatefulWidget {
@@ -52,12 +51,11 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final tabIndex = ref.watch(appTabProvider);
     final pages = <Widget>[
       const CapturePage(),
       const HistoryPage(),
-      const VideoStudioPage(),
-      const TrainingPage(),
       const SettingsPage(),
     ];
 
@@ -67,31 +65,21 @@ class _AppShellState extends ConsumerState<AppShell> {
         selectedIndex: tabIndex,
         onDestinationSelected: (index) =>
             ref.read(appTabProvider.notifier).state = index,
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.videocam_outlined),
-            selectedIcon: Icon(Icons.videocam),
-            label: 'Capture',
+            icon: const Icon(Icons.videocam_outlined),
+            selectedIcon: const Icon(Icons.videocam),
+            label: l10n.navCapture,
           ),
           NavigationDestination(
-            icon: Icon(Icons.video_library_outlined),
-            selectedIcon: Icon(Icons.video_library),
-            label: 'Dataset',
+            icon: const Icon(Icons.video_library_outlined),
+            selectedIcon: const Icon(Icons.video_library),
+            label: l10n.navHistory,
           ),
           NavigationDestination(
-            icon: Icon(Icons.auto_awesome_motion_outlined),
-            selectedIcon: Icon(Icons.auto_awesome_motion),
-            label: 'Studio',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.model_training_outlined),
-            selectedIcon: Icon(Icons.model_training),
-            label: 'Training',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.tune_outlined),
-            selectedIcon: Icon(Icons.tune),
-            label: 'Settings',
+            icon: const Icon(Icons.tune_outlined),
+            selectedIcon: const Icon(Icons.tune),
+            label: l10n.navSettings,
           ),
         ],
       ),
@@ -135,6 +123,7 @@ class _StartupPerformanceDialogState extends State<_StartupPerformanceDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return AlertDialog(
       scrollable: true,
       titlePadding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
@@ -148,12 +137,12 @@ class _StartupPerformanceDialogState extends State<_StartupPerformanceDialog> {
             value: _hideFutureModals,
             onChanged: (value) =>
                 setState(() => _hideFutureModals = value ?? false),
-            title: const Text('Don\'t show test content'),
+            title: Text(l10n.dontShowTestContent),
             contentPadding: EdgeInsets.zero,
             controlAffinity: ListTileControlAffinity.leading,
           ),
           Text(
-            'Performance tests',
+            l10n.performanceTests,
             style: Theme.of(context).textTheme.titleLarge,
           ),
         ],
@@ -169,40 +158,50 @@ class _StartupPerformanceDialogState extends State<_StartupPerformanceDialog> {
               children: [
                 _PerformanceMetricRow(
                   icon: Icons.videocam_outlined,
-                  label: 'Recording profile',
-                  value: report?.recordingSummary ?? 'Checking...',
+                  label: l10n.recordingProfile,
+                  value: report?.recordingSummary ?? l10n.checking,
                   detail: report?.recordingDetail,
                 ),
                 const SizedBox(height: 12),
                 _PerformanceMetricRow(
                   icon: Icons.accessibility_new,
-                  label: 'Pose detection',
+                  label: l10n.poseDetection,
                   value: report == null
-                      ? 'Running...'
-                      : '${report.poseDetection.fps.toStringAsFixed(0)} fps',
+                      ? l10n.running
+                      : l10n.fpsValue(
+                          report.poseDetection.fps.toStringAsFixed(0),
+                        ),
                   detail: report == null
                       ? null
-                      : '${report.poseDetection.framesProcessed} frames, '
-                            '${report.poseDetection.candidatesDetected} candidates',
+                      : l10n.framesCandidates(
+                          report.poseDetection.framesProcessed,
+                          report.poseDetection.candidatesDetected,
+                        ),
                 ),
                 const SizedBox(height: 12),
                 _PerformanceMetricRow(
                   icon: Icons.timeline,
-                  label: 'Pose processing',
+                  label: l10n.poseProcessing,
                   value: report == null
-                      ? 'Running...'
-                      : '${report.poseProcessing.fps.toStringAsFixed(0)} fps',
+                      ? l10n.running
+                      : l10n.fpsValue(
+                          report.poseProcessing.fps.toStringAsFixed(0),
+                        ),
                   detail: report == null
                       ? null
-                      : '${report.poseProcessing.framesProcessed} frames, '
-                            '${report.poseProcessing.elapsed.inMilliseconds} ms',
+                      : l10n.framesElapsedMs(
+                          report.poseProcessing.framesProcessed,
+                          report.poseProcessing.elapsed.inMilliseconds,
+                        ),
                 ),
               ],
             ),
           );
         },
       ),
-      actions: [FilledButton(onPressed: _close, child: const Text('Close'))],
+      actions: [
+        FilledButton(onPressed: _close, child: Text(l10n.close)),
+      ],
     );
   }
 }

@@ -1,0 +1,351 @@
+{
+  "@@locale": "en",
+  "appTitle": "MotionCapture",
+  "navCapture": "Capture",
+  "navHistory": "History",
+  "navSettings": "Settings",
+  "dontShowTestContent": "Don't show test content",
+  "performanceTests": "Performance tests",
+  "recordingProfile": "Recording profile",
+  "poseDetection": "Pose detection",
+  "poseProcessing": "Pose processing",
+  "checking": "Checking...",
+  "running": "Running...",
+  "close": "Close",
+  "framesCandidates": "{frames} frames, {candidates} candidates",
+  "@framesCandidates": {
+    "placeholders": {
+      "frames": {"type": "int"},
+      "candidates": {"type": "int"}
+    }
+  },
+  "framesElapsedMs": "{frames} frames, {ms} ms",
+  "@framesElapsedMs": {
+    "placeholders": {
+      "frames": {"type": "int"},
+      "ms": {"type": "int"}
+    }
+  },
+  "fpsValue": "{fps} fps",
+  "@fpsValue": {
+    "placeholders": {
+      "fps": {"type": "String"}
+    }
+  },
+  "settingsTitle": "Settings",
+  "settingsSubtitle": "Choose the live capture model and overlay behavior.",
+  "failedWithError": "Failed: {error}",
+  "@failedWithError": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
+  "showDebugSkeleton": "Show debug skeleton",
+  "showDebugSkeletonSubtitle": "Displays detector landmarks and future bounding boxes.",
+  "autoDetection": "Auto detection",
+  "autoDetectionSubtitle": "When on, MotionCapture uses the selected model to capture automatically. When off, capture stays manual and only saves when you trigger it on the Capture screen.",
+  "autoSaveToGallery": "Auto-save to gallery",
+  "autoSaveToGallerySubtitle": "When the native export pipeline is ready, clips go to the MotionCapture album.",
+  "settingsFooterNote": "Model names include the release date in YYYYMMDD format. On Android, volume keys can still fire capture while you are on Capture.",
+  "captureTfModel": "Capture TF model",
+  "captureTfModelSubtitle": "Pick the live trigger model version used during capture.",
+  "modelDrivesAutoCapture": "The selected model drives automatic swing capture.",
+  "autoDetectionOffWaiting": "Auto detection is off, so the selected model will wait until you turn it back on.",
+  "tfModelVersion": "TF model version",
+  "historyTitle": "History",
+  "historyHelpNormal": "Clips you record are saved here. Long-press a tile to select, or tap Select. Export saves copies to your photo library.",
+  "historyHelpSelection": "Tap a clip to toggle selection. Use Export or Delete when ready.",
+  "export": "Export",
+  "select": "Select",
+  "cancel": "Cancel",
+  "selectAll": "Select all",
+  "clear": "Clear",
+  "noneSelected": "None selected",
+  "nSelected": "{count} selected",
+  "@nSelected": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "delete": "Delete",
+  "deleteClipsTitle": "Delete clips",
+  "deleteClipsConfirm": "Permanently delete {count} clip(s) from this device? Video files and thumbnails will be removed.",
+  "@deleteClipsConfirm": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "exportToPhotos": "Export to Photos",
+  "exportClipsConfirm": "Save {count} clip(s) to the {album} album?",
+  "@exportClipsConfirm": {
+    "placeholders": {
+      "count": {"type": "int"},
+      "album": {"type": "String"}
+    }
+  },
+  "selectClipsToExportHint": "Select clips to export, or cancel selection to export all.",
+  "savedClipsToPhotos": "Saved {count} clip(s) to Photos.",
+  "@savedClipsToPhotos": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "savedClipsPartial": "Saved {saved} clip(s); could not save {skipped}.",
+  "@savedClipsPartial": {
+    "placeholders": {
+      "saved": {"type": "int"},
+      "skipped": {"type": "int"}
+    }
+  },
+  "noCapturedSwingsYet": "No captured swings yet",
+  "emptyHistoryHint": "Record a clip from Capture — it will show up here as a tile.",
+  "captureDetailTitle": "Capture Detail",
+  "captureDetailIndexTitle": "Capture {index} / {total}",
+  "@captureDetailIndexTitle": {
+    "placeholders": {
+      "index": {"type": "int"},
+      "total": {"type": "int"}
+    }
+  },
+  "previousVideo": "Previous video",
+  "nextVideo": "Next video",
+  "addTagTitle": "Add tag",
+  "tagNameLabel": "Tag name",
+  "tagNameHint": "e.g. forehand, backhand, warmup",
+  "save": "Save",
+  "exportSingleClipConfirm": "Save this clip to the {album} album?",
+  "@exportSingleClipConfirm": {
+    "placeholders": {
+      "album": {"type": "String"}
+    }
+  },
+  "noTaggingActionToUndo": "No tagging action to undo.",
+  "savedToPhotos": "Saved to Photos.",
+  "couldNotSaveToPhotos": "Could not save to Photos.",
+  "videoUnavailable": "Video unavailable",
+  "unavailable": "Unavailable",
+  "quickTaggingHint": "Quick tagging: swipe right=action, left=not action, up=custom tag, down=undo.",
+  "durationLabel": "Duration: {duration}",
+  "@durationLabel": {
+    "placeholders": {
+      "duration": {"type": "String"}
+    }
+  },
+  "frameRateLabel": "Frame rate: {fps}",
+  "@frameRateLabel": {
+    "placeholders": {
+      "fps": {"type": "String"}
+    }
+  },
+  "albumLabel": "Album: {album}",
+  "@albumLabel": {
+    "placeholders": {
+      "album": {"type": "String"}
+    }
+  },
+  "locationLabel": "Location: {location}",
+  "@locationLabel": {
+    "placeholders": {
+      "location": {"type": "String"}
+    }
+  },
+  "videoLabel": "Video: {fileName}",
+  "@videoLabel": {
+    "placeholders": {
+      "fileName": {"type": "String"}
+    }
+  },
+  "reviewLabel": "Review: {review}",
+  "@reviewLabel": {
+    "placeholders": {
+      "review": {"type": "String"}
+    }
+  },
+  "datasetLabel": "Dataset: {dataset}",
+  "@datasetLabel": {
+    "placeholders": {
+      "dataset": {"type": "String"}
+    }
+  },
+  "tagLabel": "Tag: {tag}",
+  "@tagLabel": {
+    "placeholders": {
+      "tag": {"type": "String"}
+    }
+  },
+  "none": "none",
+  "onDeviceSwingClassifierTitle": "On-device Swing Classifier (TFLite)",
+  "runOnDeviceInference": "Run On-device Inference",
+  "modelPathOnDevice": "Model path on device: <app-documents>/models/swing_classifier.tflite",
+  "predictedLabel": "Predicted label: {label} ({confidence}%)",
+  "@predictedLabel": {
+    "placeholders": {
+      "label": {"type": "String"},
+      "confidence": {"type": "String"}
+    }
+  },
+  "classProbability": "{className}: {probability}%",
+  "@classProbability": {
+    "placeholders": {
+      "className": {"type": "String"},
+      "probability": {"type": "String"}
+    }
+  },
+  "noPoseJsonAvailable": "No pose JSON available for this clip.",
+  "poseJsonFileNotFound": "Pose JSON file not found: {path}",
+  "@poseJsonFileNotFound": {
+    "placeholders": {
+      "path": {"type": "String"}
+    }
+  },
+  "onDeviceInferenceCompleted": "On-device inference completed.",
+  "inferenceFailed": "Inference failed: {error}",
+  "@inferenceFailed": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
+  "cameraPermissionRequiredTitle": "Camera permission is required",
+  "cameraPermissionRequiredBody": "Grant camera access to open live preview and start recording.",
+  "cameraPermissionRequiredMessage": "Camera permission is required to preview and record.",
+  "cameraReady": "Camera ready.",
+  "cameraLoading": "Camera loading",
+  "cameraNotInitialized": "Camera is not initialized yet.",
+  "couldNotRestoreCameraPreview": "Could not restore camera preview.",
+  "frontCamera": "Front Camera",
+  "backCamera": "Back Camera",
+  "externalCamera": "External Camera",
+  "captureSettingsTitle": "Capture Settings",
+  "resolutionSectionTitle": "Resolution",
+  "flashSectionTitle": "Flash",
+  "openFullSettingsTitle": "Open full settings",
+  "openFullSettingsSubtitle": "Adjust model version, detection, and debug overlay.",
+  "resolutionLow": "Low",
+  "resolutionMedium": "Medium",
+  "resolutionHigh": "High",
+  "resolutionVeryHigh": "Very High",
+  "resolutionUltraHigh": "Ultra High",
+  "resolutionMax": "Max",
+  "flashOff": "Off",
+  "flashAuto": "Auto",
+  "flashAlways": "Always",
+  "flashTorch": "Torch",
+  "tooltipSwitchCamera": "Switch camera",
+  "tooltipLinkPhones": "Link phones",
+  "tooltipCaptureSettings": "Capture settings",
+  "tooltipStopBuffer": "Stop buffer",
+  "tooltipStartBuffer": "Start buffer",
+  "tooltipCaptureSwing": "Capture swing",
+  "tooltipFinishDatasetSession": "Finish dataset session",
+  "tooltipStartDatasetSession": "Start dataset session",
+  "recordingIndicatorBuffer": "BUFFER",
+  "done": "Done",
+  "statusIdle": "Idle",
+  "statusSaving": "Saving",
+  "statusHitterDetected": "Hitter detected",
+  "statusReady": "Ready",
+  "statusSwingDetected": "Swing detected",
+  "statusManualRollingBuffer": "Manual rolling buffer",
+  "statusTrackingModel": "Tracking {modelName}",
+  "@statusTrackingModel": {
+    "placeholders": {
+      "modelName": {"type": "String"}
+    }
+  },
+  "previewStartedMonitoring": "Preview started. Monitoring for a hitter.",
+  "captureStopped": "Capture stopped.",
+  "preRollBufferRunning": "Pre-roll buffer is running.",
+  "preRollBufferStopped": "Pre-roll buffer stopped.",
+  "monitoringForHitter": "Monitoring for a hitter.",
+  "hitterDetectedStabilizing": "Hitter detected. Holding until pose stabilizes.",
+  "poseStableModelDescription": "Pose is stable. {modelDescription}",
+  "@poseStableModelDescription": {
+    "placeholders": {
+      "modelDescription": {"type": "String"}
+    }
+  },
+  "autoDetectionOffUseCaptureControl": "Auto detection is off. Use the capture control to save from the rolling buffer.",
+  "hitterLeftFrameIdle": "Hitter left frame. Returned to idle monitoring.",
+  "swingLockedWithScore": "{label} locked. Score {score}.",
+  "@swingLockedWithScore": {
+    "placeholders": {
+      "label": {"type": "String"},
+      "score": {"type": "String"}
+    }
+  },
+  "ignoredLowConfidenceTrigger": "Ignored low-confidence trigger ({score} < {threshold}).",
+  "@ignoredLowConfidenceTrigger": {
+    "placeholders": {
+      "score": {"type": "String"},
+      "threshold": {"type": "String"}
+    }
+  },
+  "duplicateClipIgnored": "Duplicate clip ignored (already saved).",
+  "recordingSavedGalleryAndHistory": "Recording saved to gallery and local history.",
+  "recordingSavedLocalHistory": "Recording saved to local history.",
+  "savedToHistoryAndPhotos": "Saved to local history and Photos.",
+  "datasetSessionStarted": "Dataset session started. Capture multiple clips.",
+  "datasetSessionFinished": "Dataset session finished ({count} clips).",
+  "@datasetSessionFinished": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "swingCooldownActive": "Swing cooldown is active.",
+  "swingCooldownActiveForSeconds": "Swing cooldown active for {seconds}s.",
+  "@swingCooldownActiveForSeconds": {
+    "placeholders": {
+      "seconds": {"type": "String"}
+    }
+  },
+  "highSpeedRollingBufferUnavailable": "High-speed rolling buffer is unavailable on this lens.",
+  "nativeRollingBufferStarted": "Native rolling buffer started.",
+  "startingNativeRollingBuffer": "Starting native rolling buffer...",
+  "rollingBufferWaitingForSegment": "Rolling buffer is waiting for a camera segment.",
+  "nativeHighSpeedCaptureStarted": "Native high-speed capture started.",
+  "swingClipSaved": "Swing clip saved.",
+  "nativeRollingBufferStillStarting": "Native rolling buffer is still starting.",
+  "nativeRollingBufferFailed": "Native rolling buffer failed.",
+  "nativeRollingBufferNoSegmentYet": "Native rolling buffer did not start a camera segment yet.",
+  "rollingBufferStopped": "Rolling buffer stopped.",
+  "savingBufferedClipNative": "Saving buffered clip from native rolling buffer.",
+  "savingPreRollClipLiveBuffer": "Saving pre-roll clip from the live buffer.",
+  "clipSavedBufferStillArmed": "Clip saved. Rolling buffer is still armed.",
+  "nativeRollingBufferNotAvailable": "Native rolling buffer is not available in this build.",
+  "savingBufferedClipFailed": "Saving buffered clip failed.",
+  "crossBodyMoveCapturing": "Cross-body move detected. Capturing buffered clip now.",
+  "manualCaptureArmedSaving": "Manual capture armed. Saving the current buffered swing.",
+  "manualCaptureArmedPostRoll": "Manual capture armed from rolling buffer. Collecting post-roll.",
+  "manualPreRollBufferStarted": "Manual pre-roll buffer started.",
+  "recordingProfileChecked": "Recording profile checked: {summary}.",
+  "@recordingProfileChecked": {
+    "placeholders": {
+      "summary": {"type": "String"}
+    }
+  },
+  "recordingSetToFastestSupported": "Recording set to fastest supported mode: {summary}.",
+  "@recordingSetToFastestSupported": {
+    "placeholders": {
+      "summary": {"type": "String"}
+    }
+  },
+  "linkPhonesTitle": "Link phones",
+  "linkPhonesWifiInstructions": "Put both phones on the same Wi-Fi. Set one phone to Detect and the other to Record.",
+  "linkPhonesBluetoothInstructions": "Use Bluetooth for capture control when Wi-Fi is unavailable. Videos will merge after both phones reconnect on Wi-Fi.",
+  "roleDetect": "Detect",
+  "roleRecord": "Record",
+  "transportWifi": "Wi-Fi",
+  "transportBluetooth": "Bluetooth",
+  "linkLabelConnection": "Connection",
+  "linkLabelThisPhone": "This phone",
+  "linkLabelSync": "Sync",
+  "linkLabelFrameRate": "Frame rate",
+  "paired": "Paired",
+  "pairedDeviceSection": "Paired device",
+  "waitingForSecondPhone": "Waiting for the second phone.",
+  "dualCameraRoleSinglePhone": "Single phone",
+  "dualCameraRoleDetectorPhone": "Detector phone",
+  "dualCameraRoleRecorderPhone": "Recorder phone",
+  "locationUnavailable": "Location unavailable",
+  "grantCameraAccess": "Grant camera access"
+}

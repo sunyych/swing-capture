@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Rect
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
@@ -52,6 +54,8 @@ private const val MOTION_SAMPLE_INTERVAL_MS = 33L
 private const val MOTION_TRIGGER_DEBOUNCE_MS = 1800L
 private const val BUFFER_STATE_INTERVAL_MS = 500L
 private const val SYNC_FRAME_INTERVAL_MS = 1000L
+private const val PREVIEW_WIDTH = 1920
+private const val PREVIEW_HEIGHT = 1080
 
 internal data class CaptureProfile(
     val width: Int,
@@ -67,6 +71,51 @@ internal fun captureProfilePriority(): List<CaptureProfile> {
         CaptureProfile(width = 1280, height = 720, fps = 60),
         CaptureProfile(width = 1920, height = 1080, fps = 30),
     )
+}
+
+internal enum class PreviewRebindAction {
+    NONE,
+    RESTART_PREVIEW,
+    RESTART_CAPTURE,
+}
+
+internal fun previewRebindAction(
+    viewChanged: Boolean,
+    captureActive: Boolean,
+    previewActive: Boolean,
+): PreviewRebindAction {
+    if (!viewChanged) {
+        return PreviewRebindAction.NONE
+    }
+    return when {
+        captureActive -> PreviewRebindAction.RESTART_CAPTURE
+        previewActive -> PreviewRebindAction.RESTART_PREVIEW
+        else -> PreviewRebindAction.NONE
+    }
+}
+
+internal fun shouldReusePreviewSurface(
+    existingSurfaceValid: Boolean,
+    existingOwner: Any?,
+    currentTexture: Any?,
+): Boolean {
+    return existingSurfaceValid && existingOwner === currentTexture
+}
+
+internal fun canSamplePreviewBitmap(
+    viewAvailable: Boolean,
+    currentTexture: Any?,
+    lastRenderedTexture: Any?,
+): Boolean {
+    return viewAvailable && currentTexture != null && currentTexture === lastRenderedTexture
+}
+
+private object IgnoredMethodResult : MethodChannel.Result {
+    override fun success(result: Any?) = Unit
+
+    override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) = Unit
+
+    override fun notImplemented() = Unit
 }
 
 private data class NativeHighSpeedConfig(
@@ -98,19 +147,10 @@ private data class NativeHighSpeedConfig(
     }
 }
 
-internal data class EncodedVideoSample(
-    val data: ByteArray,
-    val presentationTimeUs: Long,
-    val flags: Int,
-)
-
-internal data class EncodedBufferSnapshot(
-    val format: MediaFormat,
-    val samples: List<EncodedVideoSample>,
-    val targetFps: Int,
-    val width: Int,
-    val height: Int,
-    val orientationHintDegrees: Int,
+private data class NativePreviewConfig(
+    val cameraId: String,
+    val facing: Int?,
+    val size: Size,
 )
 
 private data class SavedClipResult(
@@ -126,7 +166,19 @@ internal data class RollingBufferMetrics(
     val sizeBytes: Long,
     val keyFrameCount: Int,
     val achievedFps: Double?,
-)
+) {
+    companion object {
+        fun empty(): RollingBufferMetrics {
+            return RollingBufferMetrics(
+                sampleCount = 0,
+                durationUs = 0L,
+                sizeBytes = 0L,
+                keyFrameCount = 0,
+                achievedFps = null,
+            )
+        }
+    }
+}
 
 class AndroidHighSpeedCaptureEngine(
     private val activity: FlutterActivity,
@@ -135,7 +187,7 @@ class AndroidHighSpeedCaptureEngine(
     private val encoderExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val clipSaverExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val codecLock = Any()
-    private val rollingBuffer = EncodedRollingBuffer()
+    private val rollingBuffer = RustEncodedRollingBuffer()
     private val motionDetector = NativeMotionDetector(
         sampleWidth = MOTION_SAMPLE_WIDTH,
         sampleHeight = MOTION_SAMPLE_HEIGHT,
@@ -149,6 +201,8 @@ class AndroidHighSpeedCaptureEngine(
     private var eventSink: EventChannel.EventSink? = null
     private var previewView: TextureView? = null
     private var previewSurface: Surface? = null
+    private var previewSurfaceTexture: SurfaceTexture? = null
+    private var lastRenderedPreviewTexture: SurfaceTexture? = null
     private var encoderInputSurface: Surface? = null
     private var encoder: MediaCodec? = null
     private var captureSession: CameraConstrainedHighSpeedCaptureSession? = null
@@ -160,8 +214,21 @@ class AndroidHighSpeedCaptureEngine(
     private var rollingSeconds: Int = DEFAULT_ROLLING_SECONDS
     private var debugLogging: Boolean = false
     private var drainLoopActive: Boolean = false
+    private var encoderGeneration: Long = 0L
+    private var cameraGeneration: Long = 0L
+    private var sessionGeneration: Long = 0L
     private var captureStarting: Boolean = false
     private var captureRunning: Boolean = false
+    private var previewRequested: Boolean = false
+    private var previewStarting: Boolean = false
+    private var previewRunning: Boolean = false
+    private var externalOwnerSuspended: Boolean = false
+    private var selectedLensFacing: Int = CameraCharacteristics.LENS_FACING_BACK
+    private var requestedZoomRatio: Float = 1f
+    private var activePreviewConfig: NativePreviewConfig? = null
+    private var lastCaptureArgs: Map<Any?, Any?> = emptyMap()
+    private var pendingPreviewCaptureRestartArgs: Map<Any?, Any?>? = null
+    private var pendingPreviewCaptureRestartResult: MethodChannel.Result? = null
     private var clipSaveInFlight: Boolean = false
     private var lastMotionTriggerMs: Long = 0L
 
@@ -201,22 +268,131 @@ class AndroidHighSpeedCaptureEngine(
     val isRunningOrStarting: Boolean
         get() = captureRunning || captureStarting
 
+    val isPreviewActive: Boolean
+        get() = previewRunning || previewStarting || captureRunning || captureStarting
+
+    val isPreviewFrameAvailable: Boolean
+        get() {
+            val view = previewView ?: return false
+            return canSamplePreviewBitmap(
+                viewAvailable = view.isAvailable,
+                currentTexture = view.surfaceTexture,
+                lastRenderedTexture = lastRenderedPreviewTexture,
+            )
+        }
+
     fun attachEventSink(sink: EventChannel.EventSink?) {
         eventSink = sink
     }
 
     fun attachPreviewView(view: TextureView) {
+        val previousView = previewView
+        val rebindAction = previewRebindAction(
+            viewChanged = previousView != null && previousView !== view,
+            captureActive = captureRunning || captureStarting,
+            previewActive = previewRunning || previewStarting,
+        )
         previewView = view
+        previewRequested = true
+        lastRenderedPreviewTexture = null
+        when (rebindAction) {
+            PreviewRebindAction.RESTART_CAPTURE -> {
+                log("Camera", "Preview view changed; restarting capture on its new Surface.")
+                queueCaptureRestartForPreviewSurface()
+            }
+            PreviewRebindAction.RESTART_PREVIEW -> {
+                previewStarting = false
+                previewRunning = false
+                releaseCameraSession()
+            }
+            PreviewRebindAction.NONE -> Unit
+        }
+        if (view.isAvailable) {
+            view.surfaceTexture?.let(::onPreviewSurfaceAvailable)
+        }
     }
 
     fun detachPreviewView(view: TextureView) {
         if (previewView === view) {
             previewView = null
+            lastRenderedPreviewTexture = null
+            stopCaptureInternal(sendStoppedEvent = false, resumePreview = false)
         }
     }
 
+    fun onPreviewSurfaceAvailable(surface: SurfaceTexture) {
+        val view = previewView
+        if (view == null || !view.isAvailable || view.surfaceTexture !== surface) {
+            return
+        }
+        lastRenderedPreviewTexture = null
+        val restartArgs = pendingPreviewCaptureRestartArgs
+        if (restartArgs != null) {
+            val restartResult = pendingPreviewCaptureRestartResult
+            pendingPreviewCaptureRestartArgs = null
+            pendingPreviewCaptureRestartResult = null
+            startCapture(restartArgs, restartResult ?: IgnoredMethodResult)
+            return
+        }
+        ensurePreviewSession()
+    }
+
+    fun onPreviewSurfaceDestroyed(surface: SurfaceTexture) {
+        if (lastRenderedPreviewTexture === surface) {
+            lastRenderedPreviewTexture = null
+        }
+        if (previewSurfaceTexture !== surface) {
+            return
+        }
+        when (
+            previewRebindAction(
+                viewChanged = true,
+                captureActive = captureRunning || captureStarting,
+                previewActive = previewRunning || previewStarting,
+            )
+        ) {
+            PreviewRebindAction.RESTART_CAPTURE -> queueCaptureRestartForPreviewSurface()
+            PreviewRebindAction.RESTART_PREVIEW,
+            PreviewRebindAction.NONE,
+            -> {
+                previewStarting = false
+                previewRunning = false
+                releaseCameraSession()
+            }
+        }
+    }
+
+    fun onPreviewFrameAvailable(surface: SurfaceTexture) {
+        val view = previewView ?: return
+        if (view.isAvailable && view.surfaceTexture === surface) {
+            lastRenderedPreviewTexture = surface
+        }
+    }
+
+    private fun queueCaptureRestartForPreviewSurface() {
+        val restartArgs = lastCaptureArgs.toMap()
+        val restartResult = pendingStartResult
+        pendingStartResult = null
+        stopCaptureInternal(sendStoppedEvent = false, resumePreview = false)
+        pendingPreviewCaptureRestartArgs = restartArgs
+        pendingPreviewCaptureRestartResult = restartResult
+    }
+
+    private fun cancelPendingPreviewCaptureRestart() {
+        val restartResult = pendingPreviewCaptureRestartResult
+        pendingPreviewCaptureRestartArgs = null
+        pendingPreviewCaptureRestartResult = null
+        restartResult?.error(
+            "capture_stopped",
+            "Capture was stopped before the replacement preview Surface became available.",
+            null,
+        )
+    }
+
     fun dispose() {
+        previewRequested = false
         stopCaptureInternal(sendStoppedEvent = false)
+        rollingBuffer.close()
         eventSink = null
         previewView = null
         encoderExecutor.shutdown()
@@ -225,6 +401,18 @@ class AndroidHighSpeedCaptureEngine(
 
     fun handleMethodCall(call: MethodCall, result: MethodChannel.Result): Boolean {
         when (call.method) {
+            "startPreview" -> {
+                previewRequested = true
+                externalOwnerSuspended = false
+                ensurePreviewSession()
+                result.success(null)
+                return true
+            }
+            "stopPreview" -> {
+                stopPreviewAndRelease()
+                result.success(null)
+                return true
+            }
             "getCapabilities" -> {
                 result.success(getCapabilities())
                 return true
@@ -290,12 +478,485 @@ class AndroidHighSpeedCaptureEngine(
                 result.success(savedClipMaps())
                 return true
             }
+            "switchCamera" -> {
+                switchCamera(result)
+                return true
+            }
+            "setZoomRatio" -> {
+                val ratio = (call.arguments as? Number)?.toFloat() ?: 1f
+                setZoomRatio(ratio)
+                result.success(null)
+                return true
+            }
             else -> return false
         }
     }
 
     fun stopCaptureForLegacyRebind() {
-        stopCaptureInternal(sendStoppedEvent = false)
+        externalOwnerSuspended = true
+        stopCaptureInternal(sendStoppedEvent = false, resumePreview = false)
+    }
+
+    fun stopPreviewAndRelease() {
+        previewRequested = false
+        externalOwnerSuspended = false
+        stopCaptureInternal(sendStoppedEvent = false, resumePreview = false)
+    }
+
+    fun resumeAfterExternalOwner() {
+        externalOwnerSuspended = false
+        ensurePreviewSession()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun ensurePreviewSession() {
+        if (
+            !previewRequested ||
+            externalOwnerSuspended ||
+            captureRunning ||
+            captureStarting ||
+            previewStarting
+        ) {
+            return
+        }
+        val view = previewView
+        if (view == null || !view.isAvailable || view.surfaceTexture == null) {
+            return
+        }
+        if (
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            sendError("camera_permission_missing", "Camera permission is required.")
+            return
+        }
+        val config = selectPreviewConfig()
+        if (config == null) {
+            sendError("camera_unavailable", "No Camera2 preview camera is available.")
+            return
+        }
+        if (
+            previewRunning &&
+            cameraDevice?.id == config.cameraId &&
+            activePreviewConfig == config
+        ) {
+            sendCameraState(config.cameraId, config.facing)
+            return
+        }
+
+        previewStarting = true
+        previewRunning = false
+        activePreviewConfig = config
+        val existingDevice = cameraDevice
+        if (existingDevice != null && existingDevice.id == config.cameraId) {
+            releaseCaptureSessions()
+            configurePreviewSession(existingDevice, config)
+            return
+        }
+
+        releaseCameraSession()
+        val generation = cameraGeneration
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        try {
+            manager.openCamera(
+                config.cameraId,
+                object : CameraDevice.StateCallback() {
+                    override fun onOpened(device: CameraDevice) {
+                        if (
+                            generation != cameraGeneration ||
+                            !previewRequested ||
+                            externalOwnerSuspended ||
+                            captureStarting
+                        ) {
+                            device.close()
+                            return
+                        }
+                        cameraDevice = device
+                        configurePreviewSession(device, config)
+                    }
+
+                    override fun onDisconnected(device: CameraDevice) {
+                        handleCameraDeviceFailure(
+                            device = device,
+                            generation = generation,
+                            code = "camera_disconnected",
+                            message = "Camera2 device disconnected.",
+                        )
+                    }
+
+                    override fun onError(device: CameraDevice, error: Int) {
+                        handleCameraDeviceFailure(
+                            device = device,
+                            generation = generation,
+                            code = "camera_open_failed",
+                            message = "Camera2 device error: $error.",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            previewStarting = false
+            previewRunning = false
+            sendError(
+                "camera_open_failed",
+                error.message ?: "Unable to open Camera2 preview.",
+            )
+        }
+    }
+
+    private fun configurePreviewSession(
+        device: CameraDevice,
+        config: NativePreviewConfig,
+    ) {
+        val surface = previewSurfaceFor(config.size)
+        if (surface == null) {
+            previewStarting = false
+            sendError("no_preview", "Native preview Surface is unavailable.")
+            return
+        }
+        val generation = sessionGeneration
+        try {
+            device.createCaptureSession(
+                listOf(surface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        if (
+                            generation != sessionGeneration ||
+                            cameraDevice !== device ||
+                            !previewRequested ||
+                            externalOwnerSuspended ||
+                            captureStarting
+                        ) {
+                            session.close()
+                            return
+                        }
+                        standardSession = session
+                        startPreviewRepeating(device, session, config, surface)
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        session.close()
+                        if (generation != sessionGeneration) {
+                            return
+                        }
+                        previewStarting = false
+                        previewRunning = false
+                        sendError(
+                            "preview_session_failed",
+                            "Unable to configure Camera2 preview session.",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            previewStarting = false
+            previewRunning = false
+            sendError(
+                "preview_session_failed",
+                error.message ?: "Unable to create Camera2 preview session.",
+            )
+        }
+    }
+
+    private fun startPreviewRepeating(
+        device: CameraDevice,
+        session: CameraCaptureSession,
+        config: NativePreviewConfig,
+        surface: Surface,
+    ) {
+        val generation = sessionGeneration
+        try {
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+            builder.addTarget(surface)
+            builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            builder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
+            )
+            applyZoom(builder, config.cameraId)
+            session.setRepeatingRequest(
+                builder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult,
+                    ) {
+                        if (
+                            generation != sessionGeneration ||
+                            standardSession !== session ||
+                            cameraDevice !== device ||
+                            !previewRequested ||
+                            externalOwnerSuspended
+                        ) {
+                            return
+                        }
+                        if (!previewRunning && !captureStarting) {
+                            previewStarting = false
+                            previewRunning = true
+                            emit(
+                                "CameraReady",
+                                mapOf(
+                                    "cameraId" to config.cameraId,
+                                    "lensDirection" to lensDirectionLabel(config.facing),
+                                    "width" to config.size.width,
+                                    "height" to config.size.height,
+                                    "highSpeed" to false,
+                                ),
+                            )
+                            sendCameraState(config.cameraId, config.facing)
+                            log(
+                                "Camera",
+                                "Preview started ${config.size.width}x${config.size.height} " +
+                                    "camera=${config.cameraId}",
+                            )
+                        }
+                    }
+
+                    override fun onCaptureFailed(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: CaptureFailure,
+                    ) {
+                        if (
+                            generation != sessionGeneration ||
+                            standardSession !== session ||
+                            cameraDevice !== device
+                        ) {
+                            return
+                        }
+                        previewStarting = false
+                        previewRunning = false
+                        sendError(
+                            "preview_capture_failed",
+                            "Camera2 preview capture failed: reason=${failure.reason}.",
+                        )
+                    }
+                },
+                mainHandler,
+            )
+        } catch (error: Exception) {
+            previewStarting = false
+            previewRunning = false
+            sendError(
+                "preview_capture_failed",
+                error.message ?: "Unable to start Camera2 preview request.",
+            )
+        }
+    }
+
+    private fun previewSurfaceFor(size: Size): Surface? {
+        val texture = previewView?.surfaceTexture ?: return null
+        texture.setDefaultBufferSize(size.width, size.height)
+        val existing = previewSurface
+        if (
+            existing != null &&
+            shouldReusePreviewSurface(
+                existingSurfaceValid = existing.isValid,
+                existingOwner = previewSurfaceTexture,
+                currentTexture = texture,
+            )
+        ) {
+            return existing
+        }
+        try {
+            existing?.release()
+        } catch (_: Exception) {
+        }
+        return Surface(texture).also {
+            previewSurface = it
+            previewSurfaceTexture = texture
+        }
+    }
+
+    private fun selectPreviewConfig(): NativePreviewConfig? {
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val cameraIds = manager.cameraIdList.sorted()
+        for (cameraId in cameraIds) {
+            val characteristics = try {
+                manager.getCameraCharacteristics(cameraId)
+            } catch (_: Exception) {
+                continue
+            }
+            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            if (facing != selectedLensFacing) {
+                continue
+            }
+            val sizes = characteristics
+                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(SurfaceTexture::class.java)
+                ?.toList()
+                .orEmpty()
+            val size = sizes.firstOrNull {
+                it.width == PREVIEW_WIDTH && it.height == PREVIEW_HEIGHT
+            } ?: sizes.firstOrNull {
+                it.width == 1280 && it.height == 720
+            } ?: sizes
+                .filter { it.width * 9 == it.height * 16 }
+                .maxByOrNull { it.width * it.height }
+                ?: sizes.maxByOrNull { it.width * it.height }
+                ?: continue
+            return NativePreviewConfig(cameraId = cameraId, facing = facing, size = size)
+        }
+        return null
+    }
+
+    private fun switchCamera(result: MethodChannel.Result) {
+        val restartCapture = captureRunning || captureStarting
+        val restartArgs = lastCaptureArgs
+        selectedLensFacing = if (selectedLensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+            CameraCharacteristics.LENS_FACING_FRONT
+        } else {
+            CameraCharacteristics.LENS_FACING_BACK
+        }
+        requestedZoomRatio = 1f
+        stopCaptureInternal(sendStoppedEvent = false, resumePreview = false)
+        result.success(mapOf("lensDirection" to lensDirectionLabel(selectedLensFacing)))
+        if (restartCapture && restartArgs.isNotEmpty()) {
+            startCapture(
+                restartArgs,
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) = Unit
+
+                    override fun error(
+                        errorCode: String,
+                        errorMessage: String?,
+                        errorDetails: Any?,
+                    ) = Unit
+
+                    override fun notImplemented() = Unit
+                },
+            )
+        } else {
+            ensurePreviewSession()
+        }
+    }
+
+    private fun setZoomRatio(ratio: Float) {
+        val cameraId = activeConfig?.cameraId ?: activePreviewConfig?.cameraId
+        val facing = activeConfig?.facing ?: activePreviewConfig?.facing
+        val zoomRange = cameraId?.let(::camera2ZoomRange) ?: Pair(1f, 1f)
+        requestedZoomRatio = ratio.coerceIn(zoomRange.first, zoomRange.second)
+        val device = cameraDevice
+        val preview = previewSurface
+        val config = activeConfig
+        when {
+            device != null && preview != null && config != null && captureRunning -> {
+                val encoderSurface = encoderInputSurface ?: return
+                val highSpeed = captureSession
+                if (highSpeed != null) {
+                    startRepeatingBurst(
+                        device,
+                        highSpeed,
+                        config,
+                        preview,
+                        encoderSurface,
+                    )
+                } else {
+                    val session = standardSession ?: return
+                    startRepeatingRequest(
+                        device,
+                        session,
+                        config,
+                        preview,
+                        encoderSurface,
+                    )
+                }
+            }
+            device != null && preview != null && activePreviewConfig != null -> {
+                val session = standardSession ?: return
+                startPreviewRepeating(device, session, activePreviewConfig!!, preview)
+            }
+        }
+        if (cameraId != null) {
+            sendCameraState(cameraId, facing)
+        }
+    }
+
+    private fun applyZoom(builder: CaptureRequest.Builder, cameraId: String) {
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val characteristics = try {
+            manager.getCameraCharacteristics(cameraId)
+        } catch (_: Exception) {
+            return
+        }
+        val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val zoomRatioRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            if (zoomRatioRange != null) {
+                val zoom = requestedZoomRatio.coerceIn(
+                    zoomRatioRange.lower,
+                    zoomRatioRange.upper,
+                )
+                requestedZoomRatio = zoom
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+                return
+            }
+        }
+        val maxZoom = characteristics
+            .get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+            ?.coerceAtLeast(1f)
+            ?: 1f
+        val zoom = requestedZoomRatio.coerceIn(1f, maxZoom)
+        requestedZoomRatio = zoom
+        if (zoom <= 1.001f) {
+            builder.set(CaptureRequest.SCALER_CROP_REGION, activeArray)
+            return
+        }
+        val cropWidth = (activeArray.width() / zoom).roundToInt().coerceAtLeast(2)
+        val cropHeight = (activeArray.height() / zoom).roundToInt().coerceAtLeast(2)
+        val left = activeArray.left + (activeArray.width() - cropWidth) / 2
+        val top = activeArray.top + (activeArray.height() - cropHeight) / 2
+        builder.set(
+            CaptureRequest.SCALER_CROP_REGION,
+            Rect(left, top, left + cropWidth, top + cropHeight),
+        )
+    }
+
+    private fun maxDigitalZoom(cameraId: String): Float {
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return try {
+            manager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+                ?.coerceAtLeast(1f)
+                ?: 1f
+        } catch (_: Exception) {
+            1f
+        }
+    }
+
+    private fun camera2ZoomRange(cameraId: String): Pair<Float, Float> {
+        val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return try {
+            val characteristics = manager.getCameraCharacteristics(cameraId)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val range = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (range != null) {
+                    return Pair(range.lower, range.upper.coerceAtLeast(range.lower))
+                }
+            }
+            Pair(1f, maxDigitalZoom(cameraId))
+        } catch (_: Exception) {
+            Pair(1f, 1f)
+        }
+    }
+
+    private fun sendCameraState(cameraId: String, facing: Int?) {
+        val range = camera2ZoomRange(cameraId)
+        requestedZoomRatio = requestedZoomRatio.coerceIn(range.first, range.second)
+        emit(
+            "camera_state",
+            mapOf(
+                "lensDirection" to lensDirectionLabel(facing),
+                "minZoom" to range.first.toDouble(),
+                "maxZoom" to range.second.toDouble(),
+                "zoom" to requestedZoomRatio.toDouble(),
+            ),
+        )
     }
 
     @SuppressLint("MissingPermission")
@@ -315,7 +976,11 @@ class AndroidHighSpeedCaptureEngine(
             return
         }
 
-        stopCaptureInternal(sendStoppedEvent = false)
+        stopCaptureInternal(
+            sendStoppedEvent = false,
+            resumePreview = false,
+            keepCameraDevice = true,
+        )
         rollingSeconds =
             ((args["rollingSeconds"] as? Number)?.toInt() ?: DEFAULT_ROLLING_SECONDS)
                 .coerceIn(1, 10)
@@ -323,6 +988,7 @@ class AndroidHighSpeedCaptureEngine(
             ((args["sensitivity"] as? Number)?.toDouble() ?: DEFAULT_SENSITIVITY),
         )
         debugLogging = args["debug"] as? Boolean ?: false
+        lastCaptureArgs = args.entries.associate { entry -> entry.key to entry.value }
         val candidates = selectCaptureCandidates(args)
         if (candidates.isEmpty()) {
             result.error(
@@ -334,6 +1000,7 @@ class AndroidHighSpeedCaptureEngine(
                 "high_speed_unavailable",
                 "No Camera2 high-speed recording configuration is available.",
             )
+            ensurePreviewSession()
             return
         }
 
@@ -354,6 +1021,7 @@ class AndroidHighSpeedCaptureEngine(
             captureStarting = false
             result?.error("high_speed_start_failed", message, null)
             sendError("high_speed_start_failed", message)
+            ensurePreviewSession()
             return
         }
 
@@ -364,6 +1032,8 @@ class AndroidHighSpeedCaptureEngine(
                 "camera=${config.cameraId} fps=${config.fpsRange}",
         )
         activeConfig = config
+        previewStarting = false
+        previewRunning = false
         emitBufferState()
         rollingBuffer.reset(
             windowUs = rollingSeconds * 1_000_000L,
@@ -371,27 +1041,55 @@ class AndroidHighSpeedCaptureEngine(
             width = config.size.width,
             height = config.size.height,
             orientationHintDegrees = config.orientationHintDegrees,
+            bitrateBps = config.bitrateBps,
         )
         motionDetector.reset()
         try {
+            val existingDevice = cameraDevice
+            if (existingDevice == null || existingDevice.id != config.cameraId) {
+                releaseCameraSession()
+            } else {
+                releaseCaptureSessions()
+            }
+            val generation = cameraGeneration
             startEncoder(config)
+            if (existingDevice != null && existingDevice.id == config.cameraId) {
+                configureCaptureSession(existingDevice, config)
+                return
+            }
             val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             manager.openCamera(
                 config.cameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(device: CameraDevice) {
+                        if (
+                            generation != cameraGeneration ||
+                            !captureStarting ||
+                            activeConfig != config
+                        ) {
+                            device.close()
+                            return
+                        }
                         cameraDevice = device
                         configureCaptureSession(device, config)
                     }
 
                     override fun onDisconnected(device: CameraDevice) {
-                        device.close()
-                        failCandidate("High-speed camera disconnected.")
+                        handleCameraDeviceFailure(
+                            device = device,
+                            generation = generation,
+                            code = "camera_disconnected",
+                            message = "Camera2 device disconnected.",
+                        )
                     }
 
                     override fun onError(device: CameraDevice, error: Int) {
-                        device.close()
-                        failCandidate("High-speed camera open failed: $error.")
+                        handleCameraDeviceFailure(
+                            device = device,
+                            generation = generation,
+                            code = "camera_open_failed",
+                            message = "Camera2 device error: $error.",
+                        )
                     }
                 },
                 mainHandler,
@@ -399,6 +1097,28 @@ class AndroidHighSpeedCaptureEngine(
         } catch (error: Exception) {
             failCandidate(error.message ?: "Unable to start high-speed camera.")
         }
+    }
+
+    private fun handleCameraDeviceFailure(
+        device: CameraDevice,
+        generation: Long,
+        code: String,
+        message: String,
+    ) {
+        device.close()
+        if (generation != cameraGeneration) {
+            return
+        }
+        if (cameraDevice === device) {
+            cameraDevice = null
+        }
+        if (captureStarting || captureRunning) {
+            failCandidate(message)
+            return
+        }
+        previewStarting = false
+        previewRunning = false
+        sendError(code, message)
     }
 
     private fun startEncoder(config: NativeHighSpeedConfig) {
@@ -419,12 +1139,14 @@ class AndroidHighSpeedCaptureEngine(
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = codec.createInputSurface()
         codec.start()
-        synchronized(codecLock) {
+        val generation = synchronized(codecLock) {
+            encoderGeneration += 1L
             encoder = codec
             encoderInputSurface = inputSurface
             drainLoopActive = true
+            encoderGeneration
         }
-        encoderExecutor.execute { drainEncoderLoop() }
+        encoderExecutor.execute { drainEncoderLoop(generation) }
         log("Encoder", "Started AVC encoder ${config.size.width}x${config.size.height}@${config.targetFps}")
     }
 
@@ -432,17 +1154,14 @@ class AndroidHighSpeedCaptureEngine(
         device: CameraDevice,
         config: NativeHighSpeedConfig,
     ) {
-        val view = previewView
-        val texture = view?.surfaceTexture
         val encoderSurface = encoderInputSurface
-        if (view == null || texture == null || encoderSurface == null) {
+        val localPreviewSurface = previewSurfaceFor(config.size)
+        if (localPreviewSurface == null || encoderSurface == null) {
             failCandidate("Preview or encoder Surface is unavailable.")
             return
         }
+        val generation = sessionGeneration
         try {
-            texture.setDefaultBufferSize(config.size.width, config.size.height)
-            val localPreviewSurface = Surface(texture)
-            previewSurface = localPreviewSurface
             if (!config.constrainedHighSpeed) {
                 configureStandardSession(
                     device = device,
@@ -456,6 +1175,15 @@ class AndroidHighSpeedCaptureEngine(
                 listOf(localPreviewSurface, encoderSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
+                        if (
+                            generation != sessionGeneration ||
+                            !captureStarting ||
+                            activeConfig != config ||
+                            cameraDevice !== device
+                        ) {
+                            session.close()
+                            return
+                        }
                         val highSpeed = session as? CameraConstrainedHighSpeedCaptureSession
                         if (highSpeed == null) {
                             failCandidate("Camera did not create a constrained high-speed session.")
@@ -472,6 +1200,10 @@ class AndroidHighSpeedCaptureEngine(
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
+                        session.close()
+                        if (generation != sessionGeneration) {
+                            return
+                        }
                         failCandidate("Unable to configure high-speed camera session.")
                     }
                 },
@@ -488,11 +1220,21 @@ class AndroidHighSpeedCaptureEngine(
         previewSurface: Surface,
         encoderSurface: Surface,
     ) {
+        val generation = sessionGeneration
         try {
             device.createCaptureSession(
                 listOf(previewSurface, encoderSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
+                        if (
+                            generation != sessionGeneration ||
+                            !captureStarting ||
+                            activeConfig != config ||
+                            cameraDevice !== device
+                        ) {
+                            session.close()
+                            return
+                        }
                         standardSession = session
                         startRepeatingRequest(
                             device = device,
@@ -504,6 +1246,10 @@ class AndroidHighSpeedCaptureEngine(
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
+                        session.close()
+                        if (generation != sessionGeneration) {
+                            return
+                        }
                         failCandidate("Unable to configure standard Camera2 recording session.")
                     }
                 },
@@ -521,6 +1267,7 @@ class AndroidHighSpeedCaptureEngine(
         previewSurface: Surface,
         encoderSurface: Surface,
     ) {
+        val generation = sessionGeneration
         try {
             val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             builder.addTarget(previewSurface)
@@ -544,6 +1291,7 @@ class AndroidHighSpeedCaptureEngine(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
             )
+            applyZoom(builder, config.cameraId)
             val requests = session.createHighSpeedRequestList(builder.build())
             session.setRepeatingBurst(
                 requests,
@@ -553,6 +1301,12 @@ class AndroidHighSpeedCaptureEngine(
                         request: CaptureRequest,
                         result: TotalCaptureResult,
                     ) {
+                        if (
+                            generation != sessionGeneration ||
+                            activeConfig != config
+                        ) {
+                            return
+                        }
                         markCaptureStarted(config)
                     }
 
@@ -561,6 +1315,12 @@ class AndroidHighSpeedCaptureEngine(
                         request: CaptureRequest,
                         failure: CaptureFailure,
                     ) {
+                        if (
+                            generation != sessionGeneration ||
+                            activeConfig != config
+                        ) {
+                            return
+                        }
                         val message = "High-speed capture failed: " +
                             "reason=${failure.reason}, frame=${failure.frameNumber}."
                         if (!captureRunning) {
@@ -584,6 +1344,7 @@ class AndroidHighSpeedCaptureEngine(
         previewSurface: Surface,
         encoderSurface: Surface,
     ) {
+        val generation = sessionGeneration
         try {
             val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             builder.addTarget(previewSurface)
@@ -599,6 +1360,7 @@ class AndroidHighSpeedCaptureEngine(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
             )
+            applyZoom(builder, config.cameraId)
             session.setRepeatingRequest(
                 builder.build(),
                 object : CameraCaptureSession.CaptureCallback() {
@@ -607,6 +1369,13 @@ class AndroidHighSpeedCaptureEngine(
                         request: CaptureRequest,
                         result: TotalCaptureResult,
                     ) {
+                        if (
+                            generation != sessionGeneration ||
+                            standardSession !== session ||
+                            activeConfig != config
+                        ) {
+                            return
+                        }
                         markCaptureStarted(config)
                     }
 
@@ -615,6 +1384,13 @@ class AndroidHighSpeedCaptureEngine(
                         request: CaptureRequest,
                         failure: CaptureFailure,
                     ) {
+                        if (
+                            generation != sessionGeneration ||
+                            standardSession !== session ||
+                            activeConfig != config
+                        ) {
+                            return
+                        }
                         val message = "Standard Camera2 capture failed: " +
                             "reason=${failure.reason}, frame=${failure.frameNumber}."
                         if (!captureRunning) {
@@ -637,6 +1413,13 @@ class AndroidHighSpeedCaptureEngine(
         }
         captureRunning = true
         captureStarting = false
+        previewStarting = false
+        previewRunning = true
+        activePreviewConfig = NativePreviewConfig(
+            cameraId = config.cameraId,
+            facing = config.facing,
+            size = config.size,
+        )
         emit("CameraReady", config.toMap())
         emit(
             "CaptureStarted",
@@ -645,6 +1428,7 @@ class AndroidHighSpeedCaptureEngine(
         emitBufferState()
         pendingStartResult?.success(config.toMap())
         pendingStartResult = null
+        sendCameraState(config.cameraId, config.facing)
         mainHandler.removeCallbacks(motionSamplingRunnable)
         mainHandler.postDelayed(motionSamplingRunnable, MOTION_SAMPLE_INTERVAL_MS)
         mainHandler.removeCallbacks(bufferStateRunnable)
@@ -672,6 +1456,7 @@ class AndroidHighSpeedCaptureEngine(
         result?.error("high_speed_start_failed", message, null)
         sendError("high_speed_start_failed", message)
         emitBufferState()
+        ensurePreviewSession()
     }
 
     private fun emitProfileFallbackIfNeeded(reason: String) {
@@ -719,17 +1504,30 @@ class AndroidHighSpeedCaptureEngine(
         )
     }
 
-    private fun stopCaptureInternal(sendStoppedEvent: Boolean) {
+    private fun stopCaptureInternal(
+        sendStoppedEvent: Boolean,
+        resumePreview: Boolean = true,
+        keepCameraDevice: Boolean = false,
+    ) {
+        cancelPendingPreviewCaptureRestart()
         val wasActive = captureRunning || captureStarting
+        val shouldResumePreview =
+            resumePreview && previewRequested && !externalOwnerSuspended && previewView != null
         captureRunning = false
         captureStarting = false
+        previewRunning = false
+        previewStarting = false
         pendingCandidates.clear()
         pendingStartResult?.error("capture_stopped", "Capture was stopped before startup completed.", null)
         pendingStartResult = null
         mainHandler.removeCallbacks(motionSamplingRunnable)
         mainHandler.removeCallbacks(bufferStateRunnable)
         mainHandler.removeCallbacks(syncFrameRunnable)
-        releaseCameraSession()
+        if (shouldResumePreview || keepCameraDevice) {
+            releaseCaptureSessions()
+        } else {
+            releaseCameraSession()
+        }
         releaseEncoder()
         rollingBuffer.clear()
         motionDetector.reset()
@@ -739,9 +1537,13 @@ class AndroidHighSpeedCaptureEngine(
             emit("CaptureStopped", emptyMap())
         }
         emitBufferState()
+        if (shouldResumePreview) {
+            ensurePreviewSession()
+        }
     }
 
-    private fun releaseCameraSession() {
+    private fun releaseCaptureSessions() {
+        sessionGeneration += 1L
         try {
             captureSession?.stopRepeating()
         } catch (_: Exception) {
@@ -760,6 +1562,11 @@ class AndroidHighSpeedCaptureEngine(
         } catch (_: Exception) {
         }
         standardSession = null
+    }
+
+    private fun releaseCameraSession() {
+        cameraGeneration += 1L
+        releaseCaptureSessions()
         try {
             cameraDevice?.close()
         } catch (_: Exception) {
@@ -770,6 +1577,9 @@ class AndroidHighSpeedCaptureEngine(
         } catch (_: Exception) {
         }
         previewSurface = null
+        previewSurfaceTexture = null
+        lastRenderedPreviewTexture = null
+        activePreviewConfig = null
     }
 
     private fun releaseEncoder() {
@@ -777,6 +1587,7 @@ class AndroidHighSpeedCaptureEngine(
         val inputSurface: Surface?
         synchronized(codecLock) {
             drainLoopActive = false
+            encoderGeneration += 1L
             codec = encoder
             inputSurface = encoderInputSurface
             encoder = null
@@ -800,11 +1611,11 @@ class AndroidHighSpeedCaptureEngine(
         }
     }
 
-    private fun drainEncoderLoop() {
+    private fun drainEncoderLoop(generation: Long) {
         val info = MediaCodec.BufferInfo()
         while (true) {
             val codec = synchronized(codecLock) {
-                if (!drainLoopActive) {
+                if (!drainLoopActive || encoderGeneration != generation) {
                     return
                 }
                 encoder
@@ -830,17 +1641,19 @@ class AndroidHighSpeedCaptureEngine(
                                 info.presentationTimeUs >= 0 &&
                                 info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
                         ) {
-                            output.position(info.offset)
-                            output.limit(info.offset + info.size)
-                            val data = ByteArray(info.size)
-                            output.get(data)
-                            rollingBuffer.addSample(
-                                EncodedVideoSample(
-                                    data = data,
-                                    presentationTimeUs = info.presentationTimeUs,
-                                    flags = info.flags,
-                                ),
+                            val pushed = rollingBuffer.addSample(
+                                source = output,
+                                offset = info.offset,
+                                size = info.size,
+                                presentationTimeUs = info.presentationTimeUs,
+                                flags = info.flags,
                             )
+                            if (!pushed) {
+                                log(
+                                    "RustRing",
+                                    "Dropped encoded sample size=${info.size} pts=${info.presentationTimeUs}",
+                                )
+                            }
                         }
                     } catch (_: Exception) {
                     } finally {
@@ -859,7 +1672,7 @@ class AndroidHighSpeedCaptureEngine(
 
     private fun sampleMotionFrame() {
         val view = previewView ?: return
-        if (!view.isAvailable || !captureRunning) {
+        if (!captureRunning || !isPreviewFrameAvailable) {
             return
         }
         val score = motionDetector.process(view) ?: return
@@ -896,7 +1709,7 @@ class AndroidHighSpeedCaptureEngine(
             return
         }
         val snapshot = rollingBuffer.snapshot()
-        if (snapshot == null || snapshot.samples.isEmpty()) {
+        if (snapshot == null || snapshot.sampleCount <= 0) {
             val message = "Rolling buffer does not contain encoded video yet."
             result?.error("rolling_buffer_empty", message, null)
             sendError("rolling_buffer_empty", message)
@@ -945,6 +1758,8 @@ class AndroidHighSpeedCaptureEngine(
                         error.message ?: "Unable to save high-speed clip.",
                     )
                 }
+            } finally {
+                snapshot.close()
             }
         }
     }
@@ -1066,6 +1881,9 @@ class AndroidHighSpeedCaptureEngine(
                 val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     ?: continue
                 val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                if (facing != selectedLensFacing) {
+                    continue
+                }
 
                 if (desiredFps >= 60) {
                     val availableSizes = map.highSpeedVideoSizes?.toList().orEmpty()
@@ -1251,124 +2069,13 @@ class AndroidHighSpeedCaptureEngine(
     }
 }
 
-internal class EncodedRollingBuffer {
-    private val samples = ArrayDeque<EncodedVideoSample>()
-    private var format: MediaFormat? = null
-    private var windowUs: Long = DEFAULT_ROLLING_SECONDS * 1_000_000L
-    private var targetFps: Int = 120
-    private var width: Int = 1920
-    private var height: Int = 1080
-    private var orientationHintDegrees: Int = 0
-
-    @Synchronized
-    fun reset(
-        windowUs: Long,
-        targetFps: Int,
-        width: Int,
-        height: Int,
-        orientationHintDegrees: Int,
-    ) {
-        samples.clear()
-        format = null
-        this.windowUs = windowUs
-        this.targetFps = targetFps
-        this.width = width
-        this.height = height
-        this.orientationHintDegrees = orientationHintDegrees
-    }
-
-    @Synchronized
-    fun clear() {
-        samples.clear()
-        format = null
-    }
-
-    @Synchronized
-    fun setFormat(mediaFormat: MediaFormat) {
-        format = mediaFormat
-    }
-
-    @Synchronized
-    fun addSample(sample: EncodedVideoSample) {
-        samples.addLast(sample)
-        val cutoff = sample.presentationTimeUs - windowUs
-        var latestKeyFrameIndexAtCutoff = 0
-        var index = 0
-        for (buffered in samples) {
-            if (buffered.presentationTimeUs > cutoff) {
-                break
-            }
-            if (buffered.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) {
-                latestKeyFrameIndexAtCutoff = index
-            }
-            index += 1
-        }
-        repeat(latestKeyFrameIndexAtCutoff) {
-            samples.removeFirst()
-        }
-    }
-
-    @Synchronized
-    fun metrics(): RollingBufferMetrics {
-        if (samples.isEmpty()) {
-            return RollingBufferMetrics(
-                sampleCount = 0,
-                durationUs = 0L,
-                sizeBytes = 0L,
-                keyFrameCount = 0,
-                achievedFps = null,
-            )
-        }
-        val durationUs =
-            (samples.last().presentationTimeUs - samples.first().presentationTimeUs)
-                .coerceAtLeast(0L)
-        val achievedFps = if (samples.size > 1 && durationUs > 0L) {
-            (samples.size - 1) * 1_000_000.0 / durationUs.toDouble()
-        } else {
-            null
-        }
-        return RollingBufferMetrics(
-            sampleCount = samples.size,
-            durationUs = durationUs,
-            sizeBytes = samples.sumOf { it.data.size.toLong() },
-            keyFrameCount = samples.count {
-                it.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-            },
-            achievedFps = achievedFps,
-        )
-    }
-
-    @Synchronized
-    fun snapshot(): EncodedBufferSnapshot? {
-        val mediaFormat = format ?: return null
-        if (samples.isEmpty()) {
-            return null
-        }
-        val sampleCopy = samples.toList()
-        val keyIndex = sampleCopy.indexOfFirst {
-            it.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-        }
-        if (keyIndex < 0) {
-            return null
-        }
-        return EncodedBufferSnapshot(
-            format = mediaFormat,
-            samples = sampleCopy.drop(keyIndex),
-            targetFps = targetFps,
-            width = width,
-            height = height,
-            orientationHintDegrees = orientationHintDegrees,
-        )
-    }
-}
-
 private object NativeClipSaver {
-    fun save(snapshot: EncodedBufferSnapshot, outputFile: File): SavedClipResult {
+    fun save(snapshot: RustEncodedBufferSnapshot, outputFile: File): SavedClipResult {
         outputFile.parentFile?.mkdirs()
         if (outputFile.exists()) {
             outputFile.delete()
         }
-        if (snapshot.samples.isEmpty()) {
+        if (snapshot.sampleCount <= 0) {
             throw IllegalStateException("Rolling buffer has no keyframe-backed samples.")
         }
         val muxer = MediaMuxer(
@@ -1383,21 +2090,33 @@ private object NativeClipSaver {
             muxer.setOrientationHint(snapshot.orientationHintDegrees)
             muxer.start()
             muxerStarted = true
-            val firstPtsUs = snapshot.samples.first().presentationTimeUs
+            val firstPtsUs = snapshot.samplePresentationTimeUs(0)
             var previousPtsUs = firstPtsUs
             val info = MediaCodec.BufferInfo()
-            for (sample in snapshot.samples) {
-                if (sample.data.isEmpty()) {
+            val sampleBuffer = ByteBuffer.allocateDirect(snapshot.maxSampleSize)
+            for (index in 0 until snapshot.sampleCount) {
+                val sampleSize = snapshot.sampleSize(index)
+                if (sampleSize <= 0) {
                     continue
                 }
-                val ptsUs = (sample.presentationTimeUs - firstPtsUs).coerceAtLeast(0L)
+                val presentationTimeUs = snapshot.samplePresentationTimeUs(index)
+                val ptsUs = (presentationTimeUs - firstPtsUs).coerceAtLeast(0L)
                 if (ptsUs < previousPtsUs - firstPtsUs) {
                     continue
                 }
-                val flags = sample.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME
-                info.set(0, sample.data.size, ptsUs, flags)
-                muxer.writeSampleData(trackIndex, ByteBuffer.wrap(sample.data), info)
-                previousPtsUs = sample.presentationTimeUs
+                sampleBuffer.clear()
+                val copied = snapshot.copySample(index, sampleBuffer)
+                if (copied != sampleSize) {
+                    throw IllegalStateException(
+                        "Rust snapshot copy mismatch index=$index expected=$sampleSize actual=$copied.",
+                    )
+                }
+                sampleBuffer.position(0)
+                sampleBuffer.limit(copied)
+                val flags = snapshot.sampleFlags(index) and MediaCodec.BUFFER_FLAG_KEY_FRAME
+                info.set(0, copied, ptsUs, flags)
+                muxer.writeSampleData(trackIndex, sampleBuffer, info)
+                previousPtsUs = presentationTimeUs
                 writtenFrameCount += 1
             }
             if (writtenFrameCount == 0) {

@@ -1,0 +1,276 @@
+name: Build and release mobile apps
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Store target to build and upload
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - ios
+          - android
+      version_name:
+        description: Optional marketing version, for example 1.2.3
+        required: false
+        type: string
+      play_track:
+        description: Google Play track (only used for Android)
+        required: true
+        default: internal
+        type: choice
+        options:
+          - internal
+          - alpha
+          - beta
+          - production
+      play_status:
+        description: Google Play release status
+        required: true
+        default: completed
+        type: choice
+        options:
+          - completed
+          - draft
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swingcapture-store-release
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.44.1"
+  IOS_BUNDLE_ID: com.lumiaiq.MotionCapture
+  ANDROID_PACKAGE_NAME: com.lumiaiq.MotionCapture
+  ANDROID_NDK_VERSION: 28.2.13676358
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      build_name: ${{ steps.release.outputs.build_name }}
+      build_number: ${{ steps.release.outputs.build_number }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Resolve release version
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version_name }}
+        run: |
+          pubspec_version="$(sed -n 's/^version:[[:space:]]*\([^+[:space:]]*\).*/\1/p' pubspec.yaml | head -n 1)"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            build_name="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$REQUESTED_VERSION" ]]; then
+            build_name="$REQUESTED_VERSION"
+          else
+            build_name="$pubspec_version"
+          fi
+
+          if [[ ! "$build_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version must use x.y.z format; received '$build_name'."
+            exit 64
+          fi
+
+          build_number="$(date -u +%s)"
+          echo "build_name=$build_name" >> "$GITHUB_OUTPUT"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "Release version: $build_name ($build_number)"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+  ios:
+    name: Upload iOS to TestFlight
+    needs: verify
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios' }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: app-store
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install iOS Rust target
+        run: rustup target add aarch64-apple-ios
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Import Apple distribution certificate
+        uses: apple-actions/import-codesign-certs@v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+
+      - name: Download App Store provisioning profile
+        uses: apple-actions/download-provisioning-profiles@v6.0.0
+        with:
+          bundle-id: ${{ env.IOS_BUNDLE_ID }}
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ secrets.ASC_API_ISSUER_ID }}
+          api-key-id: ${{ secrets.ASC_API_KEY_ID }}
+          api-private-key: ${{ secrets.ASC_API_PRIVATE_KEY }}
+
+      - name: Prepare App Store Connect API key
+        env:
+          API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$API_KEY_ID" || -z "$API_PRIVATE_KEY" ]]; then
+            echo "::error::ASC_API_KEY_ID and ASC_API_PRIVATE_KEY are required."
+            exit 64
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          umask 077
+          printf '%s\n' "$API_PRIVATE_KEY" > "$key_path"
+          echo "ASC_API_PRIVATE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build signed IPA and upload to TestFlight
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/release-artifacts
+          BUILD_SUFFIX: v${{ needs.verify.outputs.build_name }}-${{ needs.verify.outputs.build_number }}
+          BUILD_NAME: ${{ needs.verify.outputs.build_name }}
+          BUILD_NUMBER: ${{ needs.verify.outputs.build_number }}
+          IOS_TEAM_ID: ${{ vars.IOS_TEAM_ID || 'UXQMR4GU6P' }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          UPLOAD_TO_TESTFLIGHT: "1"
+        run: bash scripts/ios_release.sh
+
+      - name: Preserve IPA artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: SwingCapture-iOS-${{ needs.verify.outputs.build_name }}-${{ needs.verify.outputs.build_number }}
+          path: ${{ runner.temp }}/release-artifacts/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove App Store Connect API key
+        if: ${{ always() }}
+        run: rm -f "$ASC_API_PRIVATE_KEY_PATH"
+
+  android:
+    name: Upload Android to Google Play
+    needs: verify
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'android' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: play-store
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;$ANDROID_NDK_VERSION"
+
+      - name: Install Android Rust targets
+        run: |
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Prepare Android upload signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo "::error::All ANDROID_KEYSTORE_* and ANDROID_KEY_* secrets are required."
+            exit 64
+          fi
+
+          keystore_path="$RUNNER_TEMP/upload-keystore.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          {
+            printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'storeFile=%s\n' "$keystore_path"
+          } > android/key.properties
+
+      - name: Build signed Android App Bundle
+        run: >-
+          flutter build appbundle
+          --release
+          --dart-define=ENVIRONMENT=production
+          --build-name=${{ needs.verify.outputs.build_name }}
+          --build-number=${{ needs.verify.outputs.build_number }}
+
+      - name: Preserve AAB artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: SwingCapture-Android-${{ needs.verify.outputs.build_name }}-${{ needs.verify.outputs.build_number }}
+          path: build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload AAB to Google Play
+        uses: r0adkll/upload-google-play@v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ env.ANDROID_PACKAGE_NAME }}
+          releaseFiles: build/app/outputs/bundle/release/app-release.aab
+          tracks: ${{ github.event_name == 'workflow_dispatch' && inputs.play_track || 'internal' }}
+          status: ${{ github.event_name == 'workflow_dispatch' && inputs.play_status || 'completed' }}
+          releaseName: SwingCapture ${{ needs.verify.outputs.build_name }} (${{ needs.verify.outputs.build_number }})
+
+      - name: Remove Android signing files
+        if: ${{ always() }}
+        run: rm -f android/key.properties "$RUNNER_TEMP/upload-keystore.jks"

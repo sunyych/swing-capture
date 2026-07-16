@@ -9,6 +9,7 @@ import '../../../../app/providers.dart';
 import '../../../../core/config/app_constants.dart';
 import '../../../../core/models/capture_record.dart';
 import '../../../../core/utils/formatters.dart';
+import '../../../../l10n/app_localizations.dart';
 import '../../../../platform_channels/capture_platform_channel.dart';
 import '../../domain/services/swing_tflite_inference_service.dart';
 
@@ -46,9 +47,9 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   bool get _hasPrevious => _currentIndex > 0;
   bool get _hasNext => _currentIndex < _records.length - 1;
 
-  String _displayFileName(String path) {
+  String _displayFileName(String path, String unavailableLabel) {
     if (path.isEmpty) {
-      return 'Unavailable';
+      return unavailableLabel;
     }
     final normalized = path.replaceAll(r'\', '/');
     final segments = normalized.split('/').where((value) => value.isNotEmpty);
@@ -232,27 +233,31 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
     );
     final tag = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Add tag'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Tag name',
-            hintText: 'e.g. forehand, backhand, warmup',
+      builder: (context) {
+        final dialogL10n = AppLocalizations.of(context);
+        return AlertDialog(
+          title: Text(dialogL10n.addTagTitle),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: dialogL10n.tagNameLabel,
+              hintText: dialogL10n.tagNameHint,
+            ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(dialogL10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(controller.text.trim()),
+              child: Text(dialogL10n.save),
+            ),
+          ],
+        );
+      },
     );
     controller.dispose();
     if (tag == null || tag.isEmpty) {
@@ -270,7 +275,9 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No tagging action to undo.')),
+        SnackBar(
+          content: Text(AppLocalizations.of(context).noTaggingActionToUndo),
+        ),
       );
       return;
     }
@@ -314,22 +321,25 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   Future<void> _exportToGallery() async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Export to Photos'),
-        content: Text(
-          'Save this clip to the ${AppConstants.motionCaptureAlbum} album?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      builder: (context) {
+        final dialogL10n = AppLocalizations.of(context);
+        return AlertDialog(
+          title: Text(dialogL10n.exportToPhotos),
+          content: Text(
+            dialogL10n.exportSingleClipConfirm(AppConstants.motionCaptureAlbum),
           ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Export'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(dialogL10n.cancel),
+            ),
+            FilledButton.tonal(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(dialogL10n.export),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirmed != true || !mounted) {
@@ -345,31 +355,33 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
     }
     final saved = result.$1;
     final skipped = result.$2;
+    final l10n = AppLocalizations.of(context);
     messenger.showSnackBar(
       SnackBar(
         content: Text(
           skipped == 0 && saved > 0
-              ? 'Saved to Photos.'
+              ? l10n.savedToPhotos
               : saved == 0
-              ? 'Could not save to Photos.'
-              : 'Saved $saved; could not save $skipped.',
+              ? l10n.couldNotSaveToPhotos
+              : l10n.savedClipsPartial(saved, skipped),
         ),
       ),
     );
   }
 
   Future<void> _runOnDeviceInference() async {
+    final l10n = AppLocalizations.of(context);
     final poseJsonPath = _currentRecord.poseJsonPath;
     if (poseJsonPath == null || poseJsonPath.isEmpty) {
       setState(() {
-        _inferenceMessage = 'No pose JSON available for this clip.';
+        _inferenceMessage = l10n.noPoseJsonAvailable;
       });
       return;
     }
     final poseFile = File(poseJsonPath);
     if (!await poseFile.exists()) {
       setState(() {
-        _inferenceMessage = 'Pose JSON file not found: $poseJsonPath';
+        _inferenceMessage = l10n.poseJsonFileNotFound(poseJsonPath);
       });
       return;
     }
@@ -385,7 +397,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
       }
       setState(() {
         _inferenceResult = result;
-        _inferenceMessage = 'On-device inference completed.';
+        _inferenceMessage = AppLocalizations.of(context).onDeviceInferenceCompleted;
       });
       await ref
           .read(historyControllerProvider.notifier)
@@ -406,7 +418,8 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
         return;
       }
       setState(() {
-        _inferenceMessage = 'Inference failed: $error';
+        _inferenceMessage =
+            AppLocalizations.of(context).inferenceFailed('$error');
       });
     } finally {
       if (mounted) {
@@ -421,19 +434,23 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
   Widget build(BuildContext context) {
     final controller = _videoController;
     final currentRecord = _currentRecord;
+    final l10n = AppLocalizations.of(context);
 
     return Scaffold(
       appBar: AppBar(
         title: Text(
           _records.length > 1
-              ? 'Capture ${_currentIndex + 1} / ${_records.length}'
-              : 'Capture Detail',
+              ? l10n.captureDetailIndexTitle(
+                  _currentIndex + 1,
+                  _records.length,
+                )
+              : l10n.captureDetailTitle,
         ),
         actions: [
           IconButton(
             onPressed: _exportToGallery,
             icon: const Icon(Icons.save_alt_outlined),
-            tooltip: 'Export to Photos',
+            tooltip: l10n.exportToPhotos,
           ),
           IconButton(
             onPressed: _deleteCapture,
@@ -483,7 +500,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                                 bottom: 0,
                                 child: _VideoNavButton(
                                   icon: Icons.chevron_left_rounded,
-                                  tooltip: 'Previous video',
+                                  tooltip: l10n.previousVideo,
                                   onPressed: () => unawaited(
                                     _showRecordAt(_currentIndex - 1),
                                   ),
@@ -496,7 +513,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                                 bottom: 0,
                                 child: _VideoNavButton(
                                   icon: Icons.chevron_right_rounded,
-                                  tooltip: 'Next video',
+                                  tooltip: l10n.nextVideo,
                                   onPressed: () => unawaited(
                                     _showRecordAt(_currentIndex + 1),
                                   ),
@@ -504,14 +521,14 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                               ),
                           ],
                         )
-                      : const Center(child: Text('Video unavailable')),
+                      : Center(child: Text(l10n.videoUnavailable)),
                 ),
               ),
             ),
             const SizedBox(height: 12),
             if (_records.length > 1)
               Text(
-                'Quick tagging: swipe right=action, left=not action, up=custom tag, down=undo.',
+                l10n.quickTaggingHint,
                 style: Theme.of(
                   context,
                 ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
@@ -531,19 +548,32 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Duration: ${Formatters.formatDurationMs(currentRecord.durationMs)}',
+                      l10n.durationLabel(
+                        Formatters.formatDurationMs(currentRecord.durationMs),
+                      ),
                     ),
                     Text(
-                      'Frame rate: ${Formatters.formatVideoFps(currentRecord.videoFps)}',
+                      l10n.frameRateLabel(
+                        Formatters.formatVideoFps(currentRecord.videoFps),
+                      ),
                     ),
-                    Text('Album: ${currentRecord.albumName}'),
+                    Text(l10n.albumLabel(currentRecord.albumName)),
                     Text(
-                      'Location: ${currentRecord.locationLabel ?? 'Unavailable'}',
+                      l10n.locationLabel(
+                        currentRecord.locationLabel ?? l10n.unavailable,
+                      ),
                     ),
-                    Text('Video: ${_displayFileName(currentRecord.videoPath)}'),
-                    Text('Review: ${currentRecord.reviewState.name}'),
-                    Text('Dataset: ${currentRecord.datasetState.name}'),
-                    Text('Tag: ${currentRecord.userTag ?? 'none'}'),
+                    Text(
+                      l10n.videoLabel(
+                        _displayFileName(
+                          currentRecord.videoPath,
+                          l10n.unavailable,
+                        ),
+                      ),
+                    ),
+                    Text(l10n.reviewLabel(currentRecord.reviewState.name)),
+                    Text(l10n.datasetLabel(currentRecord.datasetState.name)),
+                    Text(l10n.tagLabel(currentRecord.userTag ?? l10n.none)),
                   ],
                 ),
               ),
@@ -556,7 +586,7 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'On-device Swing Classifier (TFLite)',
+                      l10n.onDeviceSwingClassifierTitle,
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 8),
@@ -570,24 +600,30 @@ class _HistoryDetailPageState extends ConsumerState<HistoryDetailPage> {
                             )
                           : const Icon(Icons.auto_graph),
                       label: Text(
-                        _isInferring ? 'Running...' : 'Run On-device Inference',
+                        _isInferring
+                            ? l10n.running
+                            : l10n.runOnDeviceInference,
                       ),
                     ),
                     const SizedBox(height: 8),
-                    Text(
-                      'Model path on device: <app-documents>/models/swing_classifier.tflite',
-                    ),
+                    Text(l10n.modelPathOnDevice),
                     if (_inferenceResult != null) ...[
                       const SizedBox(height: 8),
                       Text(
-                        'Predicted label: ${_inferenceResult!.label} '
-                        '(${(_inferenceResult!.confidence * 100).toStringAsFixed(1)}%)',
+                        l10n.predictedLabel(
+                          _inferenceResult!.label,
+                          (_inferenceResult!.confidence * 100)
+                              .toStringAsFixed(1),
+                        ),
                         style: Theme.of(context).textTheme.titleSmall,
                       ),
                       for (final entry
                           in _inferenceResult!.classProbabilities.entries)
                         Text(
-                          '${entry.key}: ${(entry.value * 100).toStringAsFixed(1)}%',
+                          l10n.classProbability(
+                            entry.key,
+                            (entry.value * 100).toStringAsFixed(1),
+                          ),
                         ),
                     ],
                     if (_inferenceMessage != null) ...[

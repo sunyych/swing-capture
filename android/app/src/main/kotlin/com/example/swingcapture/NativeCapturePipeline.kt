@@ -83,7 +83,27 @@ private const val HIGH_SPEED_EXPORT_FPS_TOLERANCE = 0.90
 private const val ROLLING_BUFFER_LOG = "NativeRollingBuffer"
 private const val STARTUP_BUFFER_TEST_LOG = "StartupBufferTest"
 private const val HIGH_SPEED_SELF_TEST_LOG = "HighSpeedBufferSelfTest"
-private const val CAMERA_PIPELINE_SWITCH_DELAY_MS = 250L
+
+internal fun isCamera2OwnedCaptureMethod(method: String): Boolean {
+    return method == "startPreview" ||
+        method == "stopPreview" ||
+        method == "switchCamera" ||
+        method == "setZoomRatio" ||
+        method == "getCapabilities" ||
+        method == "startCapture" ||
+        method == "stopCapture" ||
+        method == "startBuffering" ||
+        method == "stopBuffering" ||
+        method == "saveBufferedClip" ||
+        method == "setSensitivity" ||
+        method == "getSavedClips"
+}
+
+internal fun isCaptureStartBlockedByRtmp(method: String): Boolean {
+    return method == "startCapture" ||
+        method == "startBuffering" ||
+        method == "saveBufferedClip"
+}
 
 private class LoggingMethodResult(
     private val tag: String,
@@ -175,6 +195,7 @@ class NativeCapturePipeline(
 
     private var eventSink: EventChannel.EventSink? = null
     private var previewView: TextureView? = null
+    private var lastRenderedPreviewTexture: android.graphics.SurfaceTexture? = null
     private var previewRequested = false
     private var detectionEnabled = false
     private var isProcessingPose = false
@@ -210,7 +231,6 @@ class NativeCapturePipeline(
     private var activeHighSpeedCameraId: String? = null
     private var activeHighSpeedConfigKey: String? = null
     private var startupBufferTestActive = false
-    private var dedicatedHighSpeedStartPending = false
     private val failedHighSpeedConfigKeys = mutableSetOf<String>()
 
     private var bufferingEnabled = false
@@ -255,24 +275,28 @@ class NativeCapturePipeline(
     }
 
     fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        if (isDedicatedHighSpeedMethod(call.method)) {
-            if (call.method == "startCapture" || call.method == "startBuffering") {
-                dedicatedHighSpeedStartPending = true
-                releaseLegacyCameraForDedicatedHighSpeed()
-                mainHandler.postDelayed(
-                    {
-                        dedicatedHighSpeedStartPending = false
-                        if (androidHighSpeedCaptureEngine.handleMethodCall(call, result)) {
-                            scheduleHighSpeedPoseSamplingIfNeeded()
-                        } else {
-                            result.notImplemented()
-                        }
-                    },
-                    CAMERA_PIPELINE_SWITCH_DELAY_MS,
-                )
-                return
-            }
+        if (
+            isDedicatedHighSpeedMethod(call.method) &&
+            rtmpLive != null &&
+            isCaptureStartBlockedByRtmp(call.method)
+        ) {
+            result.error(
+                "camera_busy_rtmp",
+                "Capture is unavailable while RTMP streaming owns the camera.",
+                null,
+            )
+            return
+        }
+        val camera2HandlesMethod =
+            rtmpLive == null ||
+                (call.method != "startPreview" && call.method != "stopPreview")
+        if (isDedicatedHighSpeedMethod(call.method) && camera2HandlesMethod) {
             if (androidHighSpeedCaptureEngine.handleMethodCall(call, result)) {
+                when (call.method) {
+                    "startPreview" -> previewRequested = true
+                    "stopPreview" -> previewRequested = false
+                }
+                scheduleHighSpeedPoseSamplingIfNeeded()
                 return
             }
         }
@@ -430,6 +454,7 @@ class NativeCapturePipeline(
                 mainHandler.post {
                     try {
                         stopBuffering(discardSegments = false)
+                        androidHighSpeedCaptureEngine.stopCaptureForLegacyRebind()
                         cameraProvider?.unbindAll()
                         camera = null
                         previewUseCase = null
@@ -450,7 +475,7 @@ class NativeCapturePipeline(
                         if (!live.start(tv, url, idleBr, swingBr)) {
                             rtmpLive = null
                             result.error("rtmp_start_failed", "Could not start RTMP encoder.", null)
-                            bindUseCasesIfReady()
+                            androidHighSpeedCaptureEngine.resumeAfterExternalOwner()
                             return@post
                         }
                         live.attachPoseProcessor { image -> onRtmpPoseImage(image) }
@@ -458,7 +483,7 @@ class NativeCapturePipeline(
                     } catch (e: Exception) {
                         rtmpLive = null
                         result.error("rtmp_start_failed", e.message, null)
-                        bindUseCasesIfReady()
+                        androidHighSpeedCaptureEngine.resumeAfterExternalOwner()
                     }
                 }
             }
@@ -466,7 +491,7 @@ class NativeCapturePipeline(
                 mainHandler.post {
                     rtmpLive?.stop()
                     rtmpLive = null
-                    bindUseCasesIfReady()
+                    androidHighSpeedCaptureEngine.resumeAfterExternalOwner()
                     eventSink?.success(
                         mapOf(
                             "type" to "rtmp_state",
@@ -724,7 +749,7 @@ class NativeCapturePipeline(
     }
 
     fun attachPreviewView(view: TextureView) {
-        androidHighSpeedCaptureEngine.attachPreviewView(view)
+        lastRenderedPreviewTexture = null
         previewView = view.apply {
             isOpaque = true
             surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -733,8 +758,8 @@ class NativeCapturePipeline(
                     width: Int,
                     height: Int,
                 ) {
-                    ensureCameraProvider()
-                    bindUseCasesIfReady()
+                    androidHighSpeedCaptureEngine.onPreviewSurfaceAvailable(surface)
+                    scheduleHighSpeedPoseSamplingIfNeeded()
                 }
 
                 override fun onSurfaceTextureSizeChanged(
@@ -744,23 +769,40 @@ class NativeCapturePipeline(
                 ) = Unit
 
                 override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean {
-                    return false
+                    if (
+                        previewView === this@apply &&
+                        lastRenderedPreviewTexture === surface
+                    ) {
+                        lastRenderedPreviewTexture = null
+                    }
+                    androidHighSpeedCaptureEngine.onPreviewSurfaceDestroyed(surface)
+                    return true
                 }
 
-                override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
+                override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) {
+                    if (previewView !== this@apply) {
+                        return
+                    }
+                    if (lastRenderedPreviewTexture === surface) {
+                        return
+                    }
+                    lastRenderedPreviewTexture = surface
+                    androidHighSpeedCaptureEngine.onPreviewFrameAvailable(surface)
+                    scheduleHighSpeedPoseSamplingIfNeeded()
+                }
             }
         }
         // Surface must exist before bind; Flutter may build the PlatformView slightly
         // after startPreview(), so always arm preview when the view attaches.
         previewRequested = true
-        ensureCameraProvider()
-        bindUseCasesIfReady()
+        androidHighSpeedCaptureEngine.attachPreviewView(view)
     }
 
     fun detachPreviewView(view: TextureView) {
         androidHighSpeedCaptureEngine.detachPreviewView(view)
         if (previewView === view) {
             previewView = null
+            lastRenderedPreviewTexture = null
         }
     }
 
@@ -775,6 +817,7 @@ class NativeCapturePipeline(
         mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
         eventSink = null
         previewView = null
+        lastRenderedPreviewTexture = null
         camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
         cameraProvider?.unbindAll()
         poseDetector.close()
@@ -785,10 +828,11 @@ class NativeCapturePipeline(
     }
 
     private fun stopPreview() {
-        androidHighSpeedCaptureEngine.stopCaptureForLegacyRebind()
+        androidHighSpeedCaptureEngine.stopPreviewAndRelease()
         rtmpLive?.stop()
         rtmpLive = null
         previewRequested = false
+        lastRenderedPreviewTexture = null
         stopBuffering(discardSegments = true)
         mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
         camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
@@ -1209,10 +1253,7 @@ class NativeCapturePipeline(
     }
 
     private fun bindUseCasesIfReady() {
-        if (
-            dedicatedHighSpeedStartPending ||
-            androidHighSpeedCaptureEngine.isRunningOrStarting
-        ) {
+        if (androidHighSpeedCaptureEngine.isPreviewActive) {
             return
         }
         if (rtmpLive != null) {
@@ -1346,43 +1387,7 @@ class NativeCapturePipeline(
     }
 
     private fun isDedicatedHighSpeedMethod(method: String): Boolean {
-        return method == "getCapabilities" ||
-            method == "startCapture" ||
-            method == "stopCapture" ||
-            method == "startBuffering" ||
-            method == "stopBuffering" ||
-            method == "saveBufferedClip" ||
-            method == "setSensitivity" ||
-            method == "getSavedClips"
-    }
-
-    private fun releaseLegacyCameraForDedicatedHighSpeed() {
-        bufferingEnabled = false
-        previewRequested = true
-        mainHandler.removeCallbacks(segmentRotationRunnable)
-        mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
-        rtmpLive?.stop()
-        rtmpLive = null
-        try {
-            currentRecording?.stop()
-        } catch (_: Exception) {
-        }
-        currentRecording = null
-        currentSegmentPath = null
-        currentSegmentFinalizeCallback = null
-        currentSegmentRestartAfterFinalize = false
-        releaseHighSpeedResources()
-        camera?.cameraInfo?.zoomState?.removeObserver(zoomObserver)
-        try {
-            cameraProvider?.unbindAll()
-        } catch (_: Exception) {
-        }
-        camera = null
-        previewUseCase = null
-        analysisUseCase = null
-        videoCapture = null
-        recorder = null
-        isProcessingPose = false
+        return isCamera2OwnedCaptureMethod(method)
     }
 
     /**
@@ -2365,11 +2370,17 @@ class NativeCapturePipeline(
 
     private fun scheduleHighSpeedPoseSamplingIfNeeded() {
         mainHandler.removeCallbacks(highSpeedPoseSamplingRunnable)
+        val view = previewView
         if (
             detectionEnabled &&
                 (currentHighSpeedSegmentActive ||
-                    androidHighSpeedCaptureEngine.isRunningOrStarting) &&
-                previewView?.isAvailable == true
+                    androidHighSpeedCaptureEngine.isPreviewActive) &&
+                view != null &&
+                canSamplePreviewBitmap(
+                    viewAvailable = view.isAvailable,
+                    currentTexture = view.surfaceTexture,
+                    lastRenderedTexture = lastRenderedPreviewTexture,
+                )
         ) {
             mainHandler.postDelayed(highSpeedPoseSamplingRunnable, poseFrameIntervalMs)
         }
@@ -2391,8 +2402,12 @@ class NativeCapturePipeline(
         val view = previewView ?: return
         if (
             (!currentHighSpeedSegmentActive &&
-                !androidHighSpeedCaptureEngine.isRunningOrStarting) ||
-            !view.isAvailable
+                !androidHighSpeedCaptureEngine.isPreviewActive) ||
+            !canSamplePreviewBitmap(
+                viewAvailable = view.isAvailable,
+                currentTexture = view.surfaceTexture,
+                lastRenderedTexture = lastRenderedPreviewTexture,
+            )
         ) {
             return
         }

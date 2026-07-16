@@ -11,6 +11,7 @@ import '../../../../core/models/action_event.dart';
 import '../../../../core/models/capture_record.dart';
 import '../../../../core/models/capture_settings.dart';
 import '../../../../core/models/detection_state.dart';
+import '../../../../l10n/app_l10n.dart';
 import '../../domain/models/pose_frame.dart';
 import '../../domain/patterns/action_pattern_catalog.dart';
 import '../../domain/patterns/capture_model_catalog.dart';
@@ -131,8 +132,8 @@ class CaptureController extends Notifier<CaptureSessionState> {
       hasCameraPermission: hasCameraPermission,
       hasMicrophonePermission: hasMicrophonePermission,
       lastMessage: hasCameraPermission
-          ? 'Camera ready.'
-          : 'Camera permission is required to preview and record.',
+          ? AppL10n.current.cameraReady
+          : AppL10n.current.cameraPermissionRequiredMessage,
     );
   }
 
@@ -166,10 +167,10 @@ class CaptureController extends Notifier<CaptureSessionState> {
         hasHitter: false,
         isBuffering: false,
         showDebugOverlay: settings.showDebugSkeleton,
-        statusText: 'Idle',
+        statusText: AppL10n.current.statusIdle,
         hitterConfidence: 0,
       ),
-      lastMessage: 'Preview started. Monitoring for a hitter.',
+      lastMessage: AppL10n.current.previewStartedMonitoring,
       lastActionEvent: null,
     );
     for (final detector in _actionDetectors) {
@@ -197,7 +198,7 @@ class CaptureController extends Notifier<CaptureSessionState> {
       detectionState: DetectionState.initial(
         showDebugOverlay: state.detectionState.showDebugOverlay,
       ),
-      lastMessage: 'Capture stopped.',
+      lastMessage: AppL10n.current.captureStopped,
       lastActionEvent: null,
       lastRtmpSwingId: null,
     );
@@ -227,8 +228,8 @@ class CaptureController extends Notifier<CaptureSessionState> {
     state = state.copyWith(
       isRecording: isRecording,
       lastMessage: isRecording
-          ? 'Pre-roll buffer is running.'
-          : 'Pre-roll buffer stopped.',
+          ? AppL10n.current.preRollBufferRunning
+          : AppL10n.current.preRollBufferStopped,
     );
   }
 
@@ -243,7 +244,7 @@ class CaptureController extends Notifier<CaptureSessionState> {
     state = state.copyWith(
       detectionState: state.detectionState.copyWith(
         stage: DetectionStage.saving,
-        statusText: 'Saving',
+        statusText: AppL10n.current.statusSaving,
       ),
       lastMessage: message,
     );
@@ -293,9 +294,9 @@ class CaptureController extends Notifier<CaptureSessionState> {
         hasHitter: false,
         isBuffering: false,
         hitterConfidence: 0,
-        statusText: 'Idle',
+        statusText: AppL10n.current.statusIdle,
       ),
-      lastMessage: 'Hitter left frame. Returned to idle monitoring.',
+      lastMessage: AppL10n.current.hitterLeftFrameIdle,
       lastActionEvent: null,
     );
     _hitterFirstSeenAt = null;
@@ -350,10 +351,10 @@ class CaptureController extends Notifier<CaptureSessionState> {
           hasHitter: false,
           hitterConfidence: completeness,
           isBuffering: false,
-          statusText: 'Idle',
+          statusText: AppL10n.current.statusIdle,
           debugPoints: debugPoints,
         ),
-        lastMessage: 'Monitoring for a hitter.',
+        lastMessage: AppL10n.current.monitoringForHitter,
         lastActionEvent: null,
       );
       _hitterFirstSeenAt = null;
@@ -395,16 +396,16 @@ class CaptureController extends Notifier<CaptureSessionState> {
         isBuffering: false,
         statusText: isReady
             ? (_autoDetectionEnabled
-                  ? 'Tracking $_modelName'
-                  : 'Manual rolling buffer')
-            : 'Hitter detected',
+                  ? AppL10n.current.statusTrackingModel(_modelName)
+                  : AppL10n.current.statusManualRollingBuffer)
+            : AppL10n.current.statusHitterDetected,
         debugPoints: debugPoints,
       ),
       lastMessage: isReady
           ? (_autoDetectionEnabled
-                ? 'Pose is stable. $_modelDescription'
-                : 'Auto detection is off. Use the capture control to save from the rolling buffer.')
-          : 'Hitter detected. Holding until pose stabilizes.',
+                ? AppL10n.current.poseStableModelDescription(_modelDescription)
+                : AppL10n.current.autoDetectionOffUseCaptureControl)
+          : AppL10n.current.hitterDetectedStabilizing,
     );
 
     if (!isReady || !_autoDetectionEnabled) {
@@ -443,11 +444,13 @@ class CaptureController extends Notifier<CaptureSessionState> {
     if (alreadySaved) {
       final hasHitter = state.detectionState.hasHitter;
       state = state.copyWith(
-        lastMessage: 'Duplicate clip ignored (already saved).',
+        lastMessage: AppL10n.current.duplicateClipIgnored,
         detectionState: state.detectionState.copyWith(
           stage: hasHitter ? DetectionStage.ready : DetectionStage.idle,
           isBuffering: false,
-          statusText: hasHitter ? 'Ready' : 'Idle',
+          statusText: hasHitter
+              ? AppL10n.current.statusReady
+              : AppL10n.current.statusIdle,
         ),
         lastActionEvent: null,
       );
@@ -481,12 +484,14 @@ class CaptureController extends Notifier<CaptureSessionState> {
     final hasHitter = state.detectionState.hasHitter;
     state = state.copyWith(
       lastMessage: savedToGallery
-          ? 'Recording saved to gallery and local history.'
-          : 'Recording saved to local history.',
+          ? AppL10n.current.recordingSavedGalleryAndHistory
+          : AppL10n.current.recordingSavedLocalHistory,
       detectionState: state.detectionState.copyWith(
         stage: hasHitter ? DetectionStage.ready : DetectionStage.idle,
         isBuffering: false,
-        statusText: hasHitter ? 'Ready' : 'Idle',
+        statusText: hasHitter
+            ? AppL10n.current.statusReady
+            : AppL10n.current.statusIdle,
       ),
       lastActionEvent: null,
       lastRtmpSwingId: null,
@@ -535,8 +540,10 @@ class CaptureController extends Notifier<CaptureSessionState> {
     final threshold = settings?.autoRecordThreshold ?? 0.7;
     if (event.score < threshold) {
       state = state.copyWith(
-        lastMessage:
-            'Ignored low-confidence trigger (${event.score.toStringAsFixed(2)} < ${threshold.toStringAsFixed(2)}).',
+        lastMessage: AppL10n.current.ignoredLowConfidenceTrigger(
+          event.score.toStringAsFixed(2),
+          threshold.toStringAsFixed(2),
+        ),
       );
       return;
     }
@@ -609,10 +616,12 @@ class CaptureController extends Notifier<CaptureSessionState> {
     state = state.copyWith(
       detectionState: state.detectionState.copyWith(
         stage: DetectionStage.swingDetected,
-        statusText: 'Swing detected',
+        statusText: AppL10n.current.statusSwingDetected,
       ),
-      lastMessage:
-          '${event.label} locked. Score ${event.score.toStringAsFixed(2)}.',
+      lastMessage: AppL10n.current.swingLockedWithScore(
+        event.label,
+        event.score.toStringAsFixed(2),
+      ),
       lastActionEvent: event,
       lastRtmpSwingId: swingId,
     );
@@ -668,10 +677,10 @@ class CaptureController extends Notifier<CaptureSessionState> {
         hasHitter: false,
         hitterConfidence: 0,
         isBuffering: false,
-        statusText: 'Idle',
+        statusText: AppL10n.current.statusIdle,
         debugPoints: const <PosePoint>[],
       ),
-      lastMessage: 'Monitoring for a hitter.',
+      lastMessage: AppL10n.current.monitoringForHitter,
       lastActionEvent: null,
     );
     _hitterFirstSeenAt = null;

@@ -8,6 +8,7 @@ import '../../../../app/providers.dart';
 import '../../../../core/config/app_constants.dart';
 import '../../../../core/models/capture_record.dart';
 import '../../../../core/utils/formatters.dart';
+import '../../../../l10n/app_localizations.dart';
 import '../controllers/history_controller.dart';
 import 'history_detail_page.dart';
 
@@ -74,24 +75,23 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete clips'),
-        content: Text(
-          'Permanently delete ${selectedRecords.length} clip'
-          '${selectedRecords.length == 1 ? '' : 's'} from this device? '
-          'Video files and thumbnails will be removed.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+      builder: (context) {
+        final dialogL10n = AppLocalizations.of(context);
+        return AlertDialog(
+          title: Text(dialogL10n.deleteClipsTitle),
+          content: Text(dialogL10n.deleteClipsConfirm(selectedRecords.length)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(dialogL10n.cancel),
+            ),
+            FilledButton.tonal(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(dialogL10n.delete),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirmed != true || !mounted) {
@@ -119,9 +119,9 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'Select clips to export, or cancel selection to export all.',
+            AppLocalizations.of(context).selectClipsToExportHint,
           ),
         ),
       );
@@ -133,23 +133,28 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
     final count = targets.length;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Export to Photos'),
-        content: Text(
-          'Save $count clip${count == 1 ? '' : 's'} to the '
-          '${AppConstants.motionCaptureAlbum} album?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      builder: (context) {
+        final dialogL10n = AppLocalizations.of(context);
+        return AlertDialog(
+          title: Text(dialogL10n.exportToPhotos),
+          content: Text(
+            dialogL10n.exportClipsConfirm(
+              count,
+              AppConstants.motionCaptureAlbum,
+            ),
           ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Export'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(dialogL10n.cancel),
+            ),
+            FilledButton.tonal(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(dialogL10n.export),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirmed != true || !mounted) {
@@ -165,13 +170,13 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
     }
     final saved = result.$1;
     final skipped = result.$2;
+    final l10n = AppLocalizations.of(context);
     messenger.showSnackBar(
       SnackBar(
         content: Text(
           skipped == 0
-              ? 'Saved $saved clip${saved == 1 ? '' : 's'} to Photos.'
-              : 'Saved $saved clip${saved == 1 ? '' : 's'}; '
-                    'could not save $skipped.',
+              ? l10n.savedClipsToPhotos(saved)
+              : l10n.savedClipsPartial(saved, skipped),
         ),
       ),
     );
@@ -218,6 +223,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
 
     final asyncHistory = ref.watch(historyControllerProvider);
     final hasItems = asyncHistory.value?.isNotEmpty ?? false;
+    final l10n = AppLocalizations.of(context);
 
     return SafeArea(
       child: Padding(
@@ -230,7 +236,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
               children: [
                 Expanded(
                   child: Text(
-                    'History',
+                    l10n.historyTitle,
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
                 ),
@@ -243,15 +249,15 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
                       }
                     },
                     icon: const Icon(Icons.save_alt_outlined),
-                    label: const Text('Export'),
+                    label: Text(l10n.export),
                   ),
               ],
             ),
             const SizedBox(height: 6),
             Text(
               _selectionMode
-                  ? 'Tap a clip to toggle selection. Use Export or Delete when ready.'
-                  : 'Clips you record are saved here. Long-press a tile to select, or tap Select. Export saves copies to your photo library.',
+                  ? l10n.historyHelpSelection
+                  : l10n.historyHelpNormal,
               style: Theme.of(
                 context,
               ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
@@ -329,7 +335,8 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
                     },
                   );
                 },
-                error: (error, _) => Center(child: Text('Failed: $error')),
+                error: (error, _) =>
+                    Center(child: Text(l10n.failedWithError('$error'))),
                 loading: () => const Center(child: CircularProgressIndicator()),
               ),
             ),
@@ -365,6 +372,7 @@ class _SelectionToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     if (!selectionMode) {
       if (!canEnterSelectionMode) {
         return const SizedBox.shrink();
@@ -374,7 +382,7 @@ class _SelectionToolbar extends StatelessWidget {
         child: TextButton.icon(
           onPressed: onEnterSelect,
           icon: const Icon(Icons.checklist_rounded, size: 20),
-          label: const Text('Select'),
+          label: Text(l10n.select),
         ),
       );
     }
@@ -384,28 +392,30 @@ class _SelectionToolbar extends StatelessWidget {
       runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        TextButton(onPressed: onExitSelect, child: const Text('Cancel')),
-        TextButton(onPressed: onSelectAll, child: const Text('Select all')),
+        TextButton(onPressed: onExitSelect, child: Text(l10n.cancel)),
+        TextButton(onPressed: onSelectAll, child: Text(l10n.selectAll)),
         TextButton(
           onPressed: selectedCount == 0 ? null : onClearSelection,
-          child: const Text('Clear'),
+          child: Text(l10n.clear),
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4),
           child: Text(
-            selectedCount == 0 ? 'None selected' : '$selectedCount selected',
+            selectedCount == 0
+                ? l10n.noneSelected
+                : l10n.nSelected(selectedCount),
             style: Theme.of(context).textTheme.labelLarge,
           ),
         ),
         FilledButton.tonalIcon(
           onPressed: onExport,
           icon: const Icon(Icons.save_alt_outlined),
-          label: const Text('Export'),
+          label: Text(l10n.export),
         ),
         FilledButton.tonalIcon(
           onPressed: selectedCount == 0 ? null : onDelete,
           icon: const Icon(Icons.delete_outline),
-          label: const Text('Delete'),
+          label: Text(l10n.delete),
         ),
       ],
     );
@@ -624,6 +634,7 @@ class _EmptyHistory extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Center(
       child: DecoratedBox(
         decoration: BoxDecoration(
@@ -631,21 +642,21 @@ class _EmptyHistory extends StatelessWidget {
           borderRadius: BorderRadius.circular(24),
           border: Border.all(color: Colors.white10),
         ),
-        child: const Padding(
-          padding: EdgeInsets.all(24),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
+              const Icon(
                 Icons.video_library_outlined,
                 size: 42,
                 color: Colors.white54,
               ),
-              SizedBox(height: 12),
-              Text('No captured swings yet'),
-              SizedBox(height: 8),
+              const SizedBox(height: 12),
+              Text(l10n.noCapturedSwingsYet),
+              const SizedBox(height: 8),
               Text(
-                'Record a clip from Capture — it will show up here as a tile.',
+                l10n.emptyHistoryHint,
                 textAlign: TextAlign.center,
               ),
             ],

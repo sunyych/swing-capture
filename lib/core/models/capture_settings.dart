@@ -1,4 +1,5 @@
 import '../config/app_constants.dart';
+import '../../l10n/app_l10n.dart';
 
 /// Target frame rate for rolling buffer / recording (device may fall back).
 enum VideoFpsMode {
@@ -131,9 +132,15 @@ extension DualCameraRoleWire on DualCameraRole {
   };
 
   String get label => switch (this) {
-    DualCameraRole.disabled => 'Single phone',
-    DualCameraRole.detector => 'Detector phone',
-    DualCameraRole.recorder => 'Recorder phone',
+    DualCameraRole.disabled => AppL10n.isLoaded
+        ? AppL10n.current.dualCameraRoleSinglePhone
+        : 'Single phone',
+    DualCameraRole.detector => AppL10n.isLoaded
+        ? AppL10n.current.dualCameraRoleDetectorPhone
+        : 'Detector phone',
+    DualCameraRole.recorder => AppL10n.isLoaded
+        ? AppL10n.current.dualCameraRoleRecorderPhone
+        : 'Recorder phone',
   };
 
   bool get isActive => this != DualCameraRole.disabled;
@@ -154,8 +161,12 @@ extension DualCameraTransportModeWire on DualCameraTransportMode {
   };
 
   String get label => switch (this) {
-    DualCameraTransportMode.wifi => 'Wi-Fi sync',
-    DualCameraTransportMode.bluetoothControl => 'Bluetooth control',
+    DualCameraTransportMode.wifi => AppL10n.isLoaded
+        ? AppL10n.current.transportWifi
+        : 'Wi-Fi',
+    DualCameraTransportMode.bluetoothControl => AppL10n.isLoaded
+        ? AppL10n.current.transportBluetooth
+        : 'Bluetooth',
   };
 
   String get summary => switch (this) {

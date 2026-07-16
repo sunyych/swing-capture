@@ -6,6 +6,7 @@ import 'package:gal/gal.dart';
 import '../../../../app/providers.dart';
 import '../../../../core/config/app_constants.dart';
 import '../../../../core/models/capture_record.dart';
+import '../../../../l10n/app_l10n.dart';
 import '../../data/history_media_cleanup.dart';
 
 class CaptureRecordViewModel {
@@ -25,7 +26,7 @@ class HistoryController extends AsyncNotifier<List<CaptureRecordViewModel>> {
   CaptureRecordViewModel _toViewModel(CaptureRecord record) {
     return CaptureRecordViewModel(
       record: record,
-      subtitle: record.locationLabel ?? 'Location unavailable',
+      subtitle: record.locationLabel ?? AppL10n.current.locationUnavailable,
     );
   }
 

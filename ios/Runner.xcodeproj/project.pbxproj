@@ -16,6 +16,9 @@
 		B2A100032BAA1F005A11E003 /* NativeCapturePipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100012BAA1F005A11E001 /* NativeCapturePipeline.swift */; };
 		B2A100042BAA1F005A11E004 /* NativePreviewPlatformView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100022BAA1F005A11E002 /* NativePreviewPlatformView.swift */; };
 		B2A100062BAA1F005A11E006 /* DualCameraBleControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100052BAA1F005A11E005 /* DualCameraBleControl.swift */; };
+		B2A100072BAA1F005A11E007 /* IOSCaptureProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100102BAA1F005A11E010 /* IOSCaptureProfile.swift */; };
+		B2A100082BAA1F005A11E008 /* IOSRustRollingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100112BAA1F005A11E011 /* IOSRustRollingBuffer.swift */; };
+		B2A100092BAA1F005A11E009 /* IOSVideoToolboxEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A100122BAA1F005A11E012 /* IOSVideoToolboxEncoder.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -60,6 +63,9 @@
 		B2A100012BAA1F005A11E001 /* NativeCapturePipeline.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = NativeCapturePipeline.swift; sourceTree = "<group>"; };
 		B2A100022BAA1F005A11E002 /* NativePreviewPlatformView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = NativePreviewPlatformView.swift; sourceTree = "<group>"; };
 		B2A100052BAA1F005A11E005 /* DualCameraBleControl.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DualCameraBleControl.swift; sourceTree = "<group>"; };
+		B2A100102BAA1F005A11E010 /* IOSCaptureProfile.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = IOSCaptureProfile.swift; sourceTree = "<group>"; };
+		B2A100112BAA1F005A11E011 /* IOSRustRollingBuffer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = IOSRustRollingBuffer.swift; sourceTree = "<group>"; };
+		B2A100122BAA1F005A11E012 /* IOSVideoToolboxEncoder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = IOSVideoToolboxEncoder.swift; sourceTree = "<group>"; };
 		77D2CE065FB676AA60C9F238 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
@@ -164,6 +170,9 @@
 				B2A100012BAA1F005A11E001 /* NativeCapturePipeline.swift */,
 				B2A100022BAA1F005A11E002 /* NativePreviewPlatformView.swift */,
 				B2A100052BAA1F005A11E005 /* DualCameraBleControl.swift */,
+				B2A100102BAA1F005A11E010 /* IOSCaptureProfile.swift */,
+				B2A100112BAA1F005A11E011 /* IOSRustRollingBuffer.swift */,
+				B2A100122BAA1F005A11E012 /* IOSVideoToolboxEncoder.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -209,6 +218,7 @@
 			buildPhases = (
 				AF68EA0F9D3FA4C3269574C6 /* [CP] Check Pods Manifest.lock */,
 				9740EEB61CF901F6004384FC /* Run Script */,
+				B2A100132BAA1F005A11E013 /* Build capture_core for iOS */,
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
@@ -355,6 +365,25 @@
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
 		};
+		B2A100132BAA1F005A11E013 /* Build capture_core for iOS */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../native/capture_core/Cargo.toml",
+				"$(SRCROOT)/../native/capture_core/Cargo.lock",
+				"$(SRCROOT)/../native/capture_core/src/lib.rs",
+				"$(SRCROOT)/../native/capture_core/scripts/build-ios.sh",
+			);
+			name = "Build capture_core for iOS";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/capture_core/libcapture_core.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/../native/capture_core/scripts/build-ios.sh\" \"$SDK_NAME\" \"$ARCHS\" \"$CONFIGURATION\" \"$DERIVED_FILE_DIR/capture_core\"";
+		};
 		AF68EA0F9D3FA4C3269574C6 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -418,6 +447,9 @@
 				B2A100032BAA1F005A11E003 /* NativeCapturePipeline.swift in Sources */,
 				B2A100042BAA1F005A11E004 /* NativePreviewPlatformView.swift in Sources */,
 				B2A100062BAA1F005A11E006 /* DualCameraBleControl.swift in Sources */,
+				B2A100072BAA1F005A11E007 /* IOSCaptureProfile.swift in Sources */,
+				B2A100082BAA1F005A11E008 /* IOSRustRollingBuffer.swift in Sources */,
+				B2A100092BAA1F005A11E009 /* IOSVideoToolboxEncoder.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -517,6 +549,14 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(DERIVED_FILE_DIR)/capture_core",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lcapture_core",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.lumiaiq.MotionCapture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -701,6 +741,14 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(DERIVED_FILE_DIR)/capture_core",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lcapture_core",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.lumiaiq.MotionCapture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -723,6 +771,14 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(DERIVED_FILE_DIR)/capture_core",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lcapture_core",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.lumiaiq.MotionCapture;
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -5,11 +7,20 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val captureCoreNdkVersion = "28.2.13676358"
+val captureCoreJniLibs = layout.buildDirectory.dir("generated/captureCore/jniLibs")
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use(::load)
+    }
+}
+
 android {
     namespace = "com.lumiaiq.MotionCapture"
     compileSdk = 36
     // Match plugins (camera_android_camerax, jni, gal, path_provider_android, etc.)
-    ndkVersion = "28.2.13676358"
+    ndkVersion = captureCoreNdkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -29,19 +40,39 @@ android {
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+            }
+        }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // CI creates android/key.properties from GitHub Secrets. Keep the
+            // debug fallback so local release-mode development still works.
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
         }
     }
+
+    sourceSets.getByName("main").jniLibs.srcDir(captureCoreJniLibs)
 }
 
 flutter {
@@ -60,4 +91,51 @@ dependencies {
     implementation("com.google.mlkit:pose-detection-accurate:18.0.0-beta5")
     implementation("com.google.guava:guava:33.3.1-android")
     testImplementation("junit:junit:4.13.2")
+}
+
+val localProperties = Properties().apply {
+    val propertiesFile = rootProject.file("local.properties")
+    if (propertiesFile.exists()) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+val androidSdkRoot = providers.environmentVariable("ANDROID_SDK_ROOT")
+    .orElse(providers.environmentVariable("ANDROID_HOME"))
+    .orElse(localProperties.getProperty("sdk.dir") ?: "")
+val captureCoreNdkDir = androidSdkRoot.map { sdkRoot ->
+    file("$sdkRoot/ndk/$captureCoreNdkVersion").absolutePath
+}
+
+val buildCaptureCore by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds capture_core Rust JNI libraries for Android."
+    val workspaceRoot = rootProject.projectDir.parentFile
+    val crateRoot = workspaceRoot.resolve("native/capture_core")
+    val buildScript = crateRoot.resolve("scripts/build-android.sh")
+    workingDir(workspaceRoot)
+    commandLine(
+        "bash",
+        buildScript.absolutePath,
+        captureCoreNdkDir.get(),
+        captureCoreJniLibs.get().asFile.absolutePath,
+        "release",
+    )
+    inputs.file(crateRoot.resolve("Cargo.toml"))
+    inputs.file(crateRoot.resolve("Cargo.lock"))
+    inputs.dir(crateRoot.resolve("src"))
+    inputs.file(buildScript)
+    outputs.dir(captureCoreJniLibs)
+}
+
+tasks.configureEach {
+    if (
+        name == "mergeDebugJniLibFolders" ||
+        name == "mergeReleaseJniLibFolders" ||
+        name == "mergeProfileJniLibFolders" ||
+        name == "mergeDebugNativeLibs" ||
+        name == "mergeReleaseNativeLibs" ||
+        name == "mergeProfileNativeLibs"
+    ) {
+        dependsOn(buildCaptureCore)
+    }
 }

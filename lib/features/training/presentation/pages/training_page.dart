@@ -47,7 +47,7 @@ class TrainingPage extends ConsumerWidget {
                     const SizedBox(height: 12),
                     FilledButton.tonalIcon(
                       onPressed: () =>
-                          ref.read(appTabProvider.notifier).state = 4,
+                          ref.read(appTabProvider.notifier).state = 2,
                       icon: const Icon(Icons.tune_outlined),
                       label: const Text('Open model settings'),
                     ),

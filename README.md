@@ -29,3 +29,9 @@ SwingCapture 是一个围绕挥棒采集、姿态提取、网页标注和模型�
 - [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
 - [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
 - [Flutter documentation](https://docs.flutter.dev/)
+
+## 商店发布
+
+GitHub Actions 可以在验证通过后自动上传 iOS 到 TestFlight，并上传 Android AAB
+到 Google Play。Secrets、签名和触发方式见
+[GitHub Actions 商店发布](docs/github_store_release.md)。

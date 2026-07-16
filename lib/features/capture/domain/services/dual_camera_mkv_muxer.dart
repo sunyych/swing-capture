@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import '../../../../l10n/app_l10n.dart';
+
 class DualCameraMkvResult {
   const DualCameraMkvResult({
     required this.outputPath,
@@ -29,10 +31,20 @@ class DualCameraMkvMuxer {
     required String detectorVideoPath,
     required String recorderVideoPath,
     required String outputPath,
-    String detectorTrackName = 'Detector phone',
-    String recorderTrackName = 'Recorder phone',
+    String? detectorTrackName,
+    String? recorderTrackName,
     int recorderStartOffsetMs = 0,
   }) async {
+    final resolvedDetectorTrackName =
+        detectorTrackName ??
+        (AppL10n.isLoaded
+            ? AppL10n.current.dualCameraRoleDetectorPhone
+            : 'Detector phone');
+    final resolvedRecorderTrackName =
+        recorderTrackName ??
+        (AppL10n.isLoaded
+            ? AppL10n.current.dualCameraRoleRecorderPhone
+            : 'Recorder phone');
     final detector = await _Mp4VideoTrack.read(detectorVideoPath);
     final recorder = await _Mp4VideoTrack.read(recorderVideoPath);
     final outputFile = File(outputPath);
@@ -93,13 +105,13 @@ class DualCameraMkvMuxer {
             _trackEntry(
               number: 1,
               uid: 1,
-              name: detectorTrackName,
+              name: resolvedDetectorTrackName,
               track: detector,
             ),
             _trackEntry(
               number: 2,
               uid: 2,
-              name: recorderTrackName,
+              name: resolvedRecorderTrackName,
               track: recorder,
             ),
           ]),

@@ -1,3 +1,5 @@
+import '../../l10n/app_l10n.dart';
+
 enum DetectionStage { idle, hitterDetected, ready, swingDetected, saving }
 
 /// Snapshot of the live capture state used by the UI and native bridge.
@@ -46,7 +48,7 @@ class DetectionState {
       hasHitter: false,
       isBuffering: false,
       showDebugOverlay: showDebugOverlay,
-      statusText: 'Idle',
+      statusText: AppL10n.isLoaded ? AppL10n.current.statusIdle : 'Idle',
     );
   }
 }

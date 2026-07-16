@@ -12,6 +12,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../../app/providers.dart';
+import '../../../../l10n/app_l10n.dart';
+import '../../../../l10n/app_localizations.dart';
 import '../../../../core/config/app_constants.dart';
 import '../../../../core/rolling_buffer_clip.dart';
 import '../../../../core/models/action_event.dart';
@@ -108,9 +110,6 @@ class _CapturePageState extends ConsumerState<CapturePage>
     'high_speed_required_unavailable',
     'high_speed_capture_failed',
   };
-  static const String _nativeHighSpeedUnavailableMessage =
-      'High-speed rolling buffer is unavailable on this lens.';
-
   static const EventChannel _volumeKeyChannel = EventChannel(
     'swingcapture/volume_keys',
   );
@@ -164,7 +163,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     });
     ref
         .read(captureControllerProvider.notifier)
-        .setLastMessage('Dataset session started. Capture multiple clips.');
+        .setLastMessage(AppL10n.current.datasetSessionStarted);
   }
 
   void _finishDatasetSession() {
@@ -175,7 +174,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     });
     ref
         .read(captureControllerProvider.notifier)
-        .setLastMessage('Dataset session finished ($count clips).');
+        .setLastMessage(AppL10n.current.datasetSessionFinished(count));
   }
 
   Future<bool> _ensureNativeRollingBufferArmed() async {
@@ -276,11 +275,13 @@ class _CapturePageState extends ConsumerState<CapturePage>
   String _captureCooldownMessage() {
     final lockedUntil = _captureLockedUntil;
     if (lockedUntil == null) {
-      return 'Swing cooldown is active.';
+      return AppL10n.current.swingCooldownActive;
     }
     final remainingMs = lockedUntil.difference(DateTime.now()).inMilliseconds;
     final remainingSeconds = (remainingMs / 1000).clamp(0, double.infinity);
-    return 'Swing cooldown active for ${remainingSeconds.toStringAsFixed(1)}s.';
+    return AppL10n.current.swingCooldownActiveForSeconds(
+      remainingSeconds.toStringAsFixed(1),
+    );
   }
 
   void _armCaptureLock(
@@ -475,7 +476,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           }
           notifier.setBufferingActive(
             true,
-            lastMessage: wasRecording ? null : 'Native rolling buffer started.',
+            lastMessage: wasRecording ? null : AppL10n.current.nativeRollingBufferStarted,
           );
           _completeNativeBufferStart(true);
         } else if (!event.isBuffering) {
@@ -491,7 +492,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           }
           notifier.setBufferingActive(
             true,
-            lastMessage: 'Starting native rolling buffer...',
+            lastMessage: AppL10n.current.startingNativeRollingBuffer,
           );
         } else {
           if (wasRecording) {
@@ -499,7 +500,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           }
           notifier.setBufferingActive(
             true,
-            lastMessage: 'Rolling buffer is waiting for a camera segment.',
+            lastMessage: AppL10n.current.rollingBufferWaitingForSegment,
           );
         }
       case NativeRtmpStateEvent():
@@ -550,7 +551,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
             notifier.setRecording(true);
             notifier.setBufferingActive(
               true,
-              lastMessage: 'Native high-speed capture started.',
+              lastMessage: AppL10n.current.nativeHighSpeedCaptureStarted,
             );
           case 'CaptureStopped':
             setState(() {
@@ -561,7 +562,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
             notifier.setRecording(false);
             notifier.setBufferingActive(false);
           case 'ClipSaved':
-            notifier.setLastMessage('Swing clip saved.');
+            notifier.setLastMessage(AppL10n.current.swingClipSaved);
           case 'MotionDetected':
             break;
           case 'ProfileFallback':
@@ -685,7 +686,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       if (mounted) {
         ref
             .read(captureControllerProvider.notifier)
-            .setLastMessage('Could not restore camera preview.');
+            .setLastMessage(AppL10n.current.couldNotRestoreCameraPreview);
       }
     } finally {
       if (mounted) {
@@ -823,7 +824,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         ref
             .read(captureControllerProvider.notifier)
             .setLastMessage(
-              'Recording profile checked: ${capability.summary}.',
+              AppL10n.current.recordingProfileChecked(capability.summary),
             );
         return settings;
       }
@@ -834,7 +835,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         ref
             .read(captureControllerProvider.notifier)
             .setLastMessage(
-              'Recording profile checked: ${capability.summary}.',
+              AppL10n.current.recordingProfileChecked(capability.summary),
             );
         return settings;
       }
@@ -843,7 +844,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       ref
           .read(captureControllerProvider.notifier)
           .setLastMessage(
-            'Recording set to fastest supported mode: ${capability.summary}.',
+            AppL10n.current.recordingSetToFastestSupported(capability.summary),
           );
       return next;
     } catch (_) {
@@ -1082,7 +1083,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       } else {
         ref
             .read(captureControllerProvider.notifier)
-            .setLastMessage(_nativeHighSpeedUnavailableMessage);
+            .setLastMessage(AppL10n.current.highSpeedRollingBufferUnavailable);
         return false;
       }
     }
@@ -1098,7 +1099,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
             .read(captureControllerProvider.notifier)
             .setBufferingActive(
               true,
-              lastMessage: 'Starting native rolling buffer...',
+              lastMessage: AppL10n.current.startingNativeRollingBuffer,
             );
         return true;
       }
@@ -1112,7 +1113,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       if (!started && mounted) {
         ref
             .read(captureControllerProvider.notifier)
-            .setLastMessage('Native rolling buffer is still starting.');
+            .setLastMessage(AppL10n.current.nativeRollingBufferStillStarting);
       }
       return started;
     }
@@ -1138,7 +1139,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .read(captureControllerProvider.notifier)
           .setBufferingActive(
             false,
-            lastMessage: error.message ?? 'Native rolling buffer failed.',
+            lastMessage: error.message ?? AppL10n.current.nativeRollingBufferFailed,
           );
       return false;
     }
@@ -1147,8 +1148,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .setBufferingActive(
           true,
           lastMessage: _lastBufferSegmentRecording
-              ? 'Native rolling buffer started.'
-              : 'Starting native rolling buffer...',
+              ? AppL10n.current.nativeRollingBufferStarted
+              : AppL10n.current.startingNativeRollingBuffer,
         );
     if (_lastBufferSegmentRecording) {
       _recordingStartedAt ??= DateTime.now();
@@ -1168,8 +1169,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .read(captureControllerProvider.notifier)
           .setLastMessage(
             _lastBufferSegmentStarting
-                ? 'Native rolling buffer is still starting.'
-                : 'Native rolling buffer did not start a camera segment yet.',
+                ? AppL10n.current.nativeRollingBufferStillStarting
+                : AppL10n.current.nativeRollingBufferNoSegmentYet,
           );
     }
     return started;
@@ -1187,7 +1188,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     ref.read(captureControllerProvider.notifier).setRecording(false);
     ref
         .read(captureControllerProvider.notifier)
-        .setBufferingActive(false, lastMessage: 'Rolling buffer stopped.');
+        .setBufferingActive(false, lastMessage: AppL10n.current.rollingBufferStopped);
   }
 
   Future<void> _saveNativeBufferedSwing() async {
@@ -1210,7 +1211,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
     ref
         .read(captureControllerProvider.notifier)
-        .setSavingState('Saving buffered clip from native rolling buffer.');
+        .setSavingState(AppL10n.current.savingBufferedClipNative);
 
     try {
       final savedPath = await _capturePlatformChannel.saveBufferedClip(
@@ -1308,7 +1309,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       if (savedToGallery) {
         ref
             .read(captureControllerProvider.notifier)
-            .setLastMessage('Saved to local history and Photos.');
+            .setLastMessage(AppL10n.current.savedToHistoryAndPhotos);
       }
       if (_isCaptureLocked() &&
           ref.read(captureControllerProvider).isRecording) {
@@ -1322,19 +1323,19 @@ class _CapturePageState extends ConsumerState<CapturePage>
             .read(captureControllerProvider.notifier)
             .setBufferingActive(
               true,
-              lastMessage: 'Clip saved. Rolling buffer is still armed.',
+              lastMessage: AppL10n.current.clipSavedBufferStillArmed,
             );
       }
     } on MissingPluginException {
       ref
           .read(captureControllerProvider.notifier)
           .setLastMessage(
-            'Native rolling buffer is not available in this build.',
+            AppL10n.current.nativeRollingBufferNotAvailable,
           );
     } on PlatformException catch (error) {
       ref
           .read(captureControllerProvider.notifier)
-          .setLastMessage(error.message ?? 'Saving buffered clip failed.');
+          .setLastMessage(error.message ?? AppL10n.current.savingBufferedClipFailed);
     } finally {
       _pendingSwingEvent = null;
       _pendingClipIdOverride = null;
@@ -1772,7 +1773,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .setBufferingActive(
             true,
             lastMessage:
-                'Cross-body move detected. Capturing buffered clip now.',
+                AppL10n.current.crossBodyMoveCapturing,
           );
       if (mounted) {
         setState(() {});
@@ -1805,7 +1806,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .read(captureControllerProvider.notifier)
         .setBufferingActive(
           true,
-          lastMessage: 'Cross-body move detected. Capturing buffered clip now.',
+          lastMessage: AppL10n.current.crossBodyMoveCapturing,
         );
     _scheduleAutoFinalize(event);
     if (mounted) {
@@ -1867,8 +1868,8 @@ class _CapturePageState extends ConsumerState<CapturePage>
           .setBufferingActive(
             true,
             lastMessage: _autoDetectionEnabled(settings)
-                ? 'Manual capture armed. Saving the current buffered swing.'
-                : 'Manual capture armed from rolling buffer. Collecting post-roll.',
+                ? AppL10n.current.manualCaptureArmedSaving
+                : AppL10n.current.manualCaptureArmedPostRoll,
           );
       _scheduleAutoFinalize(event);
       if (mounted) {
@@ -1900,7 +1901,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .setBufferingActive(
           true,
           lastMessage:
-              'Manual capture armed from rolling buffer. Collecting post-roll.',
+              AppL10n.current.manualCaptureArmedPostRoll,
         );
     _scheduleAutoFinalize(event);
     if (mounted) {
@@ -2107,8 +2108,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
         detectorVideoPath: local.videoPath,
         recorderVideoPath: remote.filePath,
         outputPath: outputPath,
-        detectorTrackName: 'Detector phone',
-        recorderTrackName: remote.senderName,
+        detectorTrackName: AppL10n.current.dualCameraRoleDetectorPhone,
+        recorderTrackName: remote.senderName.isNotEmpty
+            ? remote.senderName
+            : AppL10n.current.dualCameraRoleRecorderPhone,
       );
       _dualCameraMkvCompleted.add(swingId);
       _localDualCameraClips.remove(swingId);
@@ -2347,7 +2350,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
         .read(captureControllerProvider.notifier)
         .setBufferingActive(
           true,
-          lastMessage: 'Manual pre-roll buffer started.',
+          lastMessage: AppL10n.current.manualPreRollBufferStarted,
         );
     if (mounted) {
       setState(() {});
@@ -2414,7 +2417,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
     ref
         .read(captureControllerProvider.notifier)
-        .setSavingState('Saving pre-roll clip from the live buffer.');
+        .setSavingState(AppL10n.current.savingPreRollClipLiveBuffer);
 
     final clipId =
         _pendingClipIdOverride ??
@@ -2507,7 +2510,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     if (savedToGallery) {
       ref
           .read(captureControllerProvider.notifier)
-          .setLastMessage('Saved to local history and Photos.');
+          .setLastMessage(AppL10n.current.savedToHistoryAndPhotos);
     }
 
     if (trimmedPath != rawPath) {
@@ -2859,223 +2862,6 @@ class _CapturePageState extends ConsumerState<CapturePage>
     };
   }
 
-  Future<void> _showOptionsSheet() async {
-    var sheetSettings = _settingsOrDefaults();
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF0D1B22),
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final hasActiveCamera =
-                _selectedCameraIndex >= 0 &&
-                _selectedCameraIndex < _cameras.length;
-            final currentLens = _lensLabelForUi();
-            final resolutionSubtitle = _useNativeCapturePipeline
-                ? (Platform.isAndroid
-                      ? 'CameraX HD (native)'
-                      : 'AVFoundation (native)')
-                : _resolutionLabel(_resolutionPreset);
-
-            return DraggableScrollableSheet(
-              expand: false,
-              initialChildSize: 0.72,
-              minChildSize: 0.42,
-              maxChildSize: 0.92,
-              builder: (context, scrollController) {
-                return SafeArea(
-                  child: ListView(
-                    controller: scrollController,
-                    padding: EdgeInsets.fromLTRB(
-                      20,
-                      8,
-                      20,
-                      24 + MediaQuery.viewInsetsOf(context).bottom,
-                    ),
-                    children: [
-                      Text(
-                        'Capture Settings',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        '$currentLens • $resolutionSubtitle',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Dual phone',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 12),
-                      SegmentedButton<DualCameraRole>(
-                        segments: const [
-                          ButtonSegment<DualCameraRole>(
-                            value: DualCameraRole.disabled,
-                            icon: Icon(Icons.phone_android),
-                            label: Text('Solo'),
-                          ),
-                          ButtonSegment<DualCameraRole>(
-                            value: DualCameraRole.detector,
-                            icon: Icon(Icons.center_focus_strong),
-                            label: Text('Detect'),
-                          ),
-                          ButtonSegment<DualCameraRole>(
-                            value: DualCameraRole.recorder,
-                            icon: Icon(Icons.fiber_manual_record),
-                            label: Text('Record'),
-                          ),
-                        ],
-                        selected: {sheetSettings.dualCameraRole},
-                        onSelectionChanged: (selection) {
-                          final role = selection.first;
-                          final next = sheetSettings.copyWith(
-                            dualCameraRole: role,
-                          );
-                          setModalState(() => sheetSettings = next);
-                          unawaited(
-                            ref
-                                .read(settingsControllerProvider.notifier)
-                                .updateSettings(next),
-                          );
-                          if (role.isActive) {
-                            Navigator.of(context).pop();
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              if (!mounted) {
-                                return;
-                              }
-                              unawaited(_showDualCameraLinkModal());
-                            });
-                          }
-                        },
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: sheetSettings.dualCameraRole.isActive
-                              ? () {
-                                  Navigator.of(context).pop();
-                                  unawaited(_showDualCameraLinkModal());
-                                }
-                              : null,
-                          icon: const Icon(Icons.link),
-                          label: const Text('Link phones'),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        'Resolution',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final preset in const [
-                            ResolutionPreset.medium,
-                            ResolutionPreset.high,
-                            ResolutionPreset.veryHigh,
-                          ])
-                            ChoiceChip(
-                              label: Text(_resolutionLabel(preset)),
-                              selected: _resolutionPreset == preset,
-                              onSelected:
-                                  hasActiveCamera &&
-                                      !_isOpeningCamera &&
-                                      !_useNativeCapturePipeline
-                                  ? (selected) async {
-                                      if (!selected ||
-                                          _resolutionPreset == preset) {
-                                        return;
-                                      }
-                                      setModalState(
-                                        () => _resolutionPreset = preset,
-                                      );
-                                      setState(
-                                        () => _resolutionPreset = preset,
-                                      );
-                                      await _openSelectedCamera();
-                                    }
-                                  : null,
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        'Flash',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final mode in const [
-                            FlashMode.off,
-                            FlashMode.auto,
-                            FlashMode.always,
-                            FlashMode.torch,
-                          ])
-                            ChoiceChip(
-                              label: Text(_flashModeLabel(mode)),
-                              selected: _flashMode == mode,
-                              onSelected: hasActiveCamera
-                                  ? (selected) async {
-                                      if (!selected || _flashMode == mode) {
-                                        return;
-                                      }
-                                      setModalState(() => _flashMode = mode);
-                                      setState(() => _flashMode = mode);
-                                      if (_cameraController != null &&
-                                          _cameraController!
-                                              .value
-                                              .isInitialized) {
-                                        await _cameraController!.setFlashMode(
-                                          mode,
-                                        );
-                                      }
-                                    }
-                                  : null,
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.04),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.white12),
-                        ),
-                        child: ListTile(
-                          leading: const Icon(Icons.settings_outlined),
-                          title: const Text('Open full settings'),
-                          subtitle: const Text(
-                            'Adjust model version, pre-roll, post-roll, and debug overlay.',
-                          ),
-                          onTap: () {
-                            Navigator.of(context).pop();
-                            ref.read(appTabProvider.notifier).state = 2;
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
   Future<void> _showDualCameraLinkModal() async {
     var modalSettings = _settingsOrDefaults();
     await showModalBottomSheet<void>(
@@ -3084,6 +2870,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
       showDragHandle: true,
       isScrollControlled: true,
       builder: (context) {
+        final l10n = AppLocalizations.of(context);
         return StatefulBuilder(
           builder: (context, setModalState) {
             return StreamBuilder<DualCameraSyncState>(
@@ -3111,7 +2898,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                 final paired = matchingPeers.isNotEmpty;
                 final sharedFpsText = paired
                     ? 'Both phones will record at ${sharedMode.nominalTargetFps}fps.'
-                    : 'Waiting for the second phone.';
+                    : l10n.waitingForSecondPhone;
                 final transportText =
                     modalSettings.dualCameraTransportMode.summary;
 
@@ -3132,7 +2919,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                             const Icon(Icons.link, color: Colors.cyanAccent),
                             const SizedBox(width: 10),
                             Text(
-                              'Link phones',
+                              l10n.linkPhonesTitle,
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                           ],
@@ -3141,23 +2928,23 @@ class _CapturePageState extends ConsumerState<CapturePage>
                         Text(
                           modalSettings.dualCameraTransportMode ==
                                   DualCameraTransportMode.wifi
-                              ? 'Put both phones on the same Wi-Fi. Set one phone to Detect and the other to Record.'
-                              : 'Use Bluetooth for capture control when Wi-Fi is unavailable. Videos will merge after both phones reconnect on Wi-Fi.',
+                              ? l10n.linkPhonesWifiInstructions
+                              : l10n.linkPhonesBluetoothInstructions,
                           style: Theme.of(context).textTheme.bodyMedium
                               ?.copyWith(color: Colors.white70),
                         ),
                         const SizedBox(height: 18),
                         SegmentedButton<DualCameraRole>(
-                          segments: const [
+                          segments: [
                             ButtonSegment<DualCameraRole>(
                               value: DualCameraRole.detector,
-                              icon: Icon(Icons.center_focus_strong),
-                              label: Text('Detect'),
+                              icon: const Icon(Icons.center_focus_strong),
+                              label: Text(l10n.roleDetect),
                             ),
                             ButtonSegment<DualCameraRole>(
                               value: DualCameraRole.recorder,
-                              icon: Icon(Icons.fiber_manual_record),
-                              label: Text('Record'),
+                              icon: const Icon(Icons.fiber_manual_record),
+                              label: Text(l10n.roleRecord),
                             ),
                           ],
                           selected: {
@@ -3181,16 +2968,16 @@ class _CapturePageState extends ConsumerState<CapturePage>
                         ),
                         const SizedBox(height: 18),
                         SegmentedButton<DualCameraTransportMode>(
-                          segments: const [
+                          segments: [
                             ButtonSegment<DualCameraTransportMode>(
                               value: DualCameraTransportMode.wifi,
-                              icon: Icon(Icons.wifi),
-                              label: Text('Wi-Fi'),
+                              icon: const Icon(Icons.wifi),
+                              label: Text(l10n.transportWifi),
                             ),
                             ButtonSegment<DualCameraTransportMode>(
                               value: DualCameraTransportMode.bluetoothControl,
-                              icon: Icon(Icons.bluetooth),
-                              label: Text('Bluetooth'),
+                              icon: const Icon(Icons.bluetooth),
+                              label: Text(l10n.transportBluetooth),
                             ),
                           ],
                           selected: {modalSettings.dualCameraTransportMode},
@@ -3214,21 +3001,24 @@ class _CapturePageState extends ConsumerState<CapturePage>
                                   DualCameraTransportMode.wifi
                               ? Icons.wifi
                               : Icons.bluetooth,
-                          label: 'Connection',
+                          label: l10n.linkLabelConnection,
                           value: transportText,
                           color: Colors.cyanAccent,
                         ),
                         const SizedBox(height: 10),
                         _LinkStatusRow(
                           icon: Icons.phone_android,
-                          label: 'This phone',
-                          value: modalSettings.dualCameraRole.label,
+                          label: l10n.linkLabelThisPhone,
+                          value: _dualCameraRoleLabel(
+                            modalSettings.dualCameraRole,
+                            l10n,
+                          ),
                         ),
                         const SizedBox(height: 10),
                         _LinkStatusRow(
                           icon: paired ? Icons.check_circle : Icons.sync,
-                          label: 'Sync',
-                          value: paired ? 'Paired' : syncState.message,
+                          label: l10n.linkLabelSync,
+                          value: paired ? l10n.paired : syncState.message,
                           color: paired
                               ? Colors.lightGreenAccent
                               : Colors.orangeAccent,
@@ -3236,14 +3026,14 @@ class _CapturePageState extends ConsumerState<CapturePage>
                         const SizedBox(height: 10),
                         _LinkStatusRow(
                           icon: Icons.speed,
-                          label: 'Frame rate',
+                          label: l10n.linkLabelFrameRate,
                           value: sharedFpsText,
                           color: Colors.cyanAccent,
                         ),
                         if (matchingPeers.isNotEmpty) ...[
                           const SizedBox(height: 18),
                           Text(
-                            'Paired device',
+                            l10n.pairedDeviceSection,
                             style: Theme.of(context).textTheme.titleSmall,
                           ),
                           const SizedBox(height: 8),
@@ -3254,7 +3044,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                                 icon: Icons.smartphone,
                                 label: peer.deviceName,
                                 value:
-                                    '${peer.role.label} · ${peer.transport.label}'
+                                    '${_dualCameraRoleLabel(peer.role, l10n)} · ${_dualCameraTransportLabel(peer.transport, l10n)}'
                                     '${peer.advertisedFps == null ? '' : ' · ${peer.advertisedFps}fps max'}',
                               ),
                             ),
@@ -3264,7 +3054,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                           width: double.infinity,
                           child: FilledButton(
                             onPressed: () => Navigator.of(context).pop(),
-                            child: const Text('Done'),
+                            child: Text(l10n.done),
                           ),
                         ),
                       ],
@@ -3281,6 +3071,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final state = ref.watch(captureControllerProvider);
     final settingsValue = ref.watch(settingsControllerProvider).value;
     final effectiveSettings = settingsValue ?? CaptureSettings.defaults();
@@ -3365,7 +3156,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              _buildPreview(state),
+              _buildPreview(state, l10n),
               if (_isOpeningCamera && _isCameraReady)
                 const _PreviewLoadingOverlay(),
               Positioned(
@@ -3379,7 +3170,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
                         padding: const EdgeInsets.only(right: 8),
                         child: IconButton.filledTonal(
                           onPressed: _isOpeningCamera ? null : _switchCamera,
-                          tooltip: 'Switch camera',
+                          tooltip: l10n.tooltipSwitchCamera,
                           icon: const Icon(Icons.cameraswitch),
                         ),
                       ),
@@ -3388,15 +3179,10 @@ class _CapturePageState extends ConsumerState<CapturePage>
                         padding: const EdgeInsets.only(right: 8),
                         child: IconButton.filledTonal(
                           onPressed: _showDualCameraLinkModal,
-                          tooltip: 'Link phones',
+                          tooltip: l10n.tooltipLinkPhones,
                           icon: const Icon(Icons.link),
                         ),
                       ),
-                    IconButton.filledTonal(
-                      tooltip: 'Capture settings',
-                      onPressed: _showOptionsSheet,
-                      icon: const Icon(Icons.settings_outlined),
-                    ),
                   ],
                 ),
               ),
@@ -3442,20 +3228,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
     );
   }
 
-  String _lensLabelForUi() {
-    if (_useNativeCapturePipeline) {
-      if (!_nativePreviewReady) {
-        return 'Camera loading';
-      }
-      return _nativeLensDirection == 'front' ? 'Front camera' : 'Back camera';
-    }
-    if (_selectedCameraIndex >= 0 && _selectedCameraIndex < _cameras.length) {
-      return _lensLabel(_cameras[_selectedCameraIndex]);
-    }
-    return 'Camera loading';
-  }
-
-  Widget _buildPreview(CaptureSessionState state) {
+  Widget _buildPreview(CaptureSessionState state, AppLocalizations l10n) {
     if (_useNativeCapturePipeline) {
       return _buildNativePreview(state);
     }
@@ -3473,9 +3246,7 @@ class _CapturePageState extends ConsumerState<CapturePage>
 
     final controller = _cameraController;
     if (controller == null || !controller.value.isInitialized) {
-      return const _CameraPreviewPlaceholder(
-        message: 'Camera is not initialized yet.',
-      );
+      return _CameraPreviewPlaceholder(message: l10n.cameraNotInitialized);
     }
 
     Widget? overlay;
@@ -3591,6 +3362,7 @@ class _PermissionView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -3612,12 +3384,12 @@ class _PermissionView extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                'Camera permission is required',
+                l10n.cameraPermissionRequiredTitle,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Grant camera access to open live preview and start recording.',
+              Text(
+                l10n.cameraPermissionRequiredBody,
                 textAlign: TextAlign.center,
               ),
             ],
@@ -3686,19 +3458,20 @@ class _RecordingIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.red.withValues(alpha: 0.95),
         borderRadius: BorderRadius.circular(999),
       ),
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.fiber_manual_record, size: 14, color: Colors.white),
-            SizedBox(width: 4),
-            Text('BUFFER'),
+            const Icon(Icons.fiber_manual_record, size: 14, color: Colors.white),
+            const SizedBox(width: 4),
+            Text(l10n.recordingIndicatorBuffer),
           ],
         ),
       ),
@@ -3725,6 +3498,7 @@ class _CaptureControlsOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.42),
@@ -3740,7 +3514,9 @@ class _CaptureControlsOverlay extends StatelessWidget {
               onPressed: hasCameraPermission
                   ? () => unawaited(onToggleRecording())
                   : null,
-              tooltip: isRecording ? 'Stop buffer' : 'Start buffer',
+              tooltip: isRecording
+                  ? l10n.tooltipStopBuffer
+                  : l10n.tooltipStartBuffer,
               style: IconButton.styleFrom(
                 backgroundColor: isRecording
                     ? const Color(0xFFB91C1C)
@@ -3758,7 +3534,7 @@ class _CaptureControlsOverlay extends StatelessWidget {
               onPressed: hasCameraPermission
                   ? () => unawaited(onCaptureSwing())
                   : null,
-              tooltip: 'Capture swing',
+              tooltip: l10n.tooltipCaptureSwing,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
                 backgroundColor: const Color(0xFF1D4ED8).withValues(alpha: 0.9),
@@ -3770,8 +3546,8 @@ class _CaptureControlsOverlay extends StatelessWidget {
             IconButton.filledTonal(
               onPressed: hasCameraPermission ? onToggleSession : null,
               tooltip: sessionActive
-                  ? 'Finish dataset session'
-                  : 'Start dataset session',
+                  ? l10n.tooltipFinishDatasetSession
+                  : l10n.tooltipStartDatasetSession,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
                 backgroundColor: sessionActive
@@ -4111,22 +3887,21 @@ class _LinkStatusRow extends StatelessWidget {
   }
 }
 
-String _lensLabel(CameraDescription camera) {
-  return switch (camera.lensDirection) {
-    CameraLensDirection.front => 'Front Camera',
-    CameraLensDirection.back => 'Back Camera',
-    CameraLensDirection.external => 'External Camera',
+String _dualCameraRoleLabel(DualCameraRole role, AppLocalizations l10n) {
+  return switch (role) {
+    DualCameraRole.disabled => l10n.dualCameraRoleSinglePhone,
+    DualCameraRole.detector => l10n.dualCameraRoleDetectorPhone,
+    DualCameraRole.recorder => l10n.dualCameraRoleRecorderPhone,
   };
 }
 
-String _resolutionLabel(ResolutionPreset preset) {
-  return switch (preset) {
-    ResolutionPreset.low => 'Low',
-    ResolutionPreset.medium => 'Medium',
-    ResolutionPreset.high => 'High',
-    ResolutionPreset.veryHigh => 'Very High',
-    ResolutionPreset.ultraHigh => 'Ultra High',
-    ResolutionPreset.max => 'Max',
+String _dualCameraTransportLabel(
+  DualCameraTransportMode transport,
+  AppLocalizations l10n,
+) {
+  return switch (transport) {
+    DualCameraTransportMode.wifi => l10n.transportWifi,
+    DualCameraTransportMode.bluetoothControl => l10n.transportBluetooth,
   };
 }
 
@@ -4143,13 +3918,4 @@ double _previewAspectRatio(BuildContext context, CameraController controller) {
     return 1 / ratio;
   }
   return ratio;
-}
-
-String _flashModeLabel(FlashMode mode) {
-  return switch (mode) {
-    FlashMode.off => 'Off',
-    FlashMode.auto => 'Auto',
-    FlashMode.always => 'Always',
-    FlashMode.torch => 'Torch',
-  };
 }
